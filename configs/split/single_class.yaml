@@ -1,0 +1,5 @@
+# Natural DrivAerNet++ partition: each client holds exactly one car body type.
+# Maximally non-IID; the dataset's real-world federated setting.
+split: single_class
+args:
+  client-split-mode: single_class

@@ -1,0 +1,13 @@
+# core (versions matching the cfd_transformer conda env used for all results)
+torch
+lightning
+hydra-core
+omegaconf
+numpy
+pyvista
+# tuning + reporting
+optuna>=4.9
+matplotlib
+seaborn
+pandas
+pyyaml

@@ -1,0 +1,39 @@
+# Shared protocol. Everything any experiment needs; entries here are fixed across
+# methods so no method gains an advantage from the protocol itself.
+protocol:
+  batch_size: 32
+  local_epochs: 1
+  server_lr: 1.0        # plain weighted averaging for every method (redundant with client LRs)
+  grad_clip: 1.0
+  seed: 42
+  eval_batch_size: 1
+  skip_round0_eval: true  # evaluating the untrained model is a full-test-set no-op
+
+proxy:                  # tuning / ablations ("validation" setting)
+  downsample_size: 6000
+  rounds: 20
+  eval_every: 1
+  max_test_samples: 150
+  test_downsample_size: 20000
+  num_workers: 8
+
+full:                   # headline benchmark ("test" setting)
+  downsample_size: 50000
+  rounds: 100
+  eval_every: 5
+  max_test_samples: 0   # full test set
+  test_downsample_size: -1
+  num_workers: 8
+
+benchmark:
+  seeds: [42, 43, 44]
+  local_epochs_ablation: [1, 2, 4, 8]
+  # fairness: E x rounds held constant, so every E does identical gradient work and
+  # the curves answer both "error vs communication rounds" and "error at equal compute"
+  localsteps_budget_epochs: 80
+  gamma_ablation: [0.0, 0.01, 0.04]   # gamma effect < single-run noise; settled by error bars
+
+objective:              # tuning objective
+  metric: c_d_mae       # headline quantity; field loss decouples from drag on this task
+  tail_evals: 5         # mean of the last 5 evaluated rounds
+  audit: [c_l_mae, rel_l2_p, rel_l2_wss]   # winner must not be an outlier on these

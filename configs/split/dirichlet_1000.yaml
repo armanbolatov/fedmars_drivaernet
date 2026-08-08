@@ -1,0 +1,4 @@
+split: dirichlet_1000  # effectively IID
+args:
+  client-split-mode: dirichlet
+  alphas: 1000

@@ -1,0 +1,197 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\title{Federated Muon Algorithms}
+\author{}
+\date{}
+
+\newcommand{\NS}{\operatorname{NS}}
+\newcommand{\lmo}{\operatorname{lmo}}
+\newcommand{\gF}{\nabla F_i}
+
+\begin{document}
+\maketitle
+\vspace{-3em}
+
+\paragraph{Notation.}
+$n$ clients; each round $r$ the server samples $\mathcal{S}_r\subseteq[n]$ with
+$|\mathcal{S}_r|=S$; $K$ local steps; $R$ rounds; $\eta$ learning rate; $\alpha$
+momentum coefficient (weight on the fresh gradient). $X^{(r)}$ is the global model
+and $C^{(r)}$ the global control variate; $X_i^{(r,k)}$, $M_i^{(r,k)}$ are client
+$i$'s model and momentum at local step $k$, and $C_i^{(r)}$ its local control
+variate. $\gF(\cdot;\xi)$ is a stochastic gradient of client $i$. $\NS(\cdot)$ is
+the Newton--Schulz orthogonalization used by Muon; the spectral-norm LMO satisfies
+$\lmo(A)=-\NS(A)$. Matrix parameters follow the rules below; non-matrix parameters
+(embeddings, output head, biases) use AdamW. All algorithms are written for partial
+participation; our experiments use full participation ($\mathcal{S}_r=[n]$, $S=n$),
+where the $\tfrac{n-S}{n}X$ term vanishes.
+
+% =====================================================================
+\section*{Control variates, in words}
+
+In heterogeneous federated learning, client $i$ minimizes its \emph{own} loss $F_i$,
+whose minimizer differs from the global one. Over $K$ local steps the client drifts
+toward its own optimum, so averaging the drifted models gives a biased global step
+(``client drift''). SCAFFOLD fixes this with two running estimates:
+\[
+  C_i \approx \nabla F_i(X)\quad(\text{how client $i$ pulls}),
+  \qquad
+  C=\tfrac1n\textstyle\sum_i C_i \approx \nabla f(X)\quad(\text{how the average pulls}).
+\]
+Each local gradient $g$ is replaced by the \textbf{corrected gradient}
+\[
+  g \;-\; C_i \;+\; C .
+\]
+Subtracting $C_i$ removes client $i$'s local bias; adding $C$ injects the global
+direction. So every client moves as if it saw the global gradient, and the drift
+cancels. The one design choice is how to set $C_i$ at the end of a round:
+\begin{itemize}
+  \item \textbf{SCAFFOLD:} the \emph{average} local gradient,
+        $\;C_i^{(r+1)}=\frac1K\sum_{k}\gF(X_i^{(r,k)})$.
+        Its usual written form $\frac{1}{K\eta}\big(X^{(r)}-X_i^{(r,K)}\big)$ is
+        \emph{exactly} this average --- that is where the mean hides in SCAFFOLD.
+  \item \textbf{FedMuon:} the \emph{final} momentum, $\;C_i^{(r+1)}=M_i^{(r,K)}$ ---
+        a single end-of-round snapshot, hence a higher-variance estimate.
+  \item \textbf{cv-mean (ours):} the \emph{average} momentum,
+        $\;C_i^{(r+1)}=\frac1K\sum_k M_i^{(r,k)}$ --- brings SCAFFOLD's averaging
+        back into FedMuon.
+\end{itemize}
+\textbf{Why the average helps.} If $C_i$ is a noisy estimate of client $i$'s pull,
+the corrected gradient over- or under-corrects that client, so heterogeneous clients
+are served unevenly. Averaging over the $K$ steps is a much lower-variance estimate,
+so the drift cancels correctly for \emph{every} client. This was exactly our failure
+mode: with the final-momentum rule the hardest client group was badly under-fit
+($c_d\!=\!0.020$, $R^2\!<\!0$); the mean rule fixed it ($c_d\!=\!0.013$, $R^2\!>\!0$)
+and pushed the global drag error below the SCAFFOLD-Adam baseline.
+
+% =====================================================================
+\section*{Algorithms}
+
+% ---------------------------------------------------------------- FedAvg
+\begin{algorithm}[H]
+\caption{FedAvg \cite{fedavg}}
+\begin{algorithmic}[1]
+\State \textbf{init} $X^{(0)}$
+\For{$r=0,\dots,R-1$}
+  \State sample $\mathcal{S}_r\subseteq[n]$; send $X^{(r)}$ to $i\in\mathcal{S}_r$
+  \For{$i\in\mathcal{S}_r$ \textbf{in parallel}}
+    \State $X_i^{(r,0)}\gets X^{(r)}$
+    \For{$k=0,\dots,K-1$}
+      \State $X_i^{(r,k+1)}\gets X_i^{(r,k)}-\eta\,\gF(X_i^{(r,k)};\xi)$
+        \Comment{AdamW step in our experiments}
+    \EndFor
+  \EndFor
+  \State $X^{(r+1)}\gets\tfrac{n-S}{n}X^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}X_i^{(r,K)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% ---------------------------------------------------------------- SCAFFOLD
+\begin{algorithm}[H]
+\caption{SCAFFOLD \cite{scaffold}}
+\begin{algorithmic}[1]
+\State \textbf{init} $X^{(0)}$, $C^{(0)}\!=\!0$, $C_i^{(0)}\!=\!0$
+\For{$r=0,\dots,R-1$}
+  \State sample $\mathcal{S}_r\subseteq[n]$; send $X^{(r)},C^{(r)}$ to $i\in\mathcal{S}_r$
+  \For{$i\in\mathcal{S}_r$ \textbf{in parallel}}
+    \State $X_i^{(r,0)}\gets X^{(r)}$
+    \For{$k=0,\dots,K-1$}
+      \State $g_i^{(r,k)}\gets\gF(X_i^{(r,k)};\xi)$
+      \State $X_i^{(r,k+1)}\gets X_i^{(r,k)}-\eta\,(g_i^{(r,k)}-C_i^{(r)}+C^{(r)})$
+    \EndFor
+    \State $C_i^{(r+1)}\gets\dfrac1K\sum_{k=0}^{K-1}g_i^{(r,k)}$
+      \Comment{\textbf{control variate}: mean local gradient $=\tfrac{1}{K\eta}(X^{(r)}-X_i^{(r,K)})$}
+  \EndFor
+  \For{$i\in[n]\setminus\mathcal{S}_r$}
+    \State $C_i^{(r+1)}\gets C_i^{(r)}$ \Comment{not sampled: unchanged}
+  \EndFor
+  \State $C^{(r+1)}\gets C^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}\big(C_i^{(r+1)}-C_i^{(r)}\big)$
+  \State $X^{(r+1)}\gets\tfrac{n-S}{n}X^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}X_i^{(r,K)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% ---------------------------------------------------------------- FedMuon
+\begin{algorithm}[H]
+\caption{FedMuon \cite{fedmuon}}
+\begin{algorithmic}[1]
+\State \textbf{init} $X^{(0)}$, $C^{(0)}\!=\!0$, $C_i^{(0)}\!=\!0$, $M_i^{(-1,K)}\!=\!0$
+\For{$r=0,\dots,R-1$}
+  \State sample $\mathcal{S}_r\subseteq[n]$; send $X^{(r)},C^{(r)}$ to $i\in\mathcal{S}_r$
+  \For{$i\in\mathcal{S}_r$ \textbf{in parallel}}
+    \State $X_i^{(r,0)}\gets X^{(r)}$; \ \ $M_i^{(r,0)}\gets M_i^{(r-1,K)}$
+      \Comment{resume momentum}
+    \For{$k=0,\dots,K-1$}
+      \State $M_i^{(r,k+1)}\gets(1-\alpha)M_i^{(r,k)}+\alpha\,\gF(X_i^{(r,k)};\xi)$
+      \State $X_i^{(r,k+1)}\gets X_i^{(r,k)}-\eta\,\NS\big(M_i^{(r,k+1)}-C_i^{(r)}+C^{(r)}\big)$
+        \Comment{$=X_i^{(r,k)}+\eta\,\lmo(\cdot)$}
+    \EndFor
+    \State $C_i^{(r+1)}\gets M_i^{(r,K)}$
+      \Comment{\textbf{control variate}: final momentum}
+  \EndFor
+  \For{$i\in[n]\setminus\mathcal{S}_r$}
+    \State $C_i^{(r+1)}\gets C_i^{(r)}$; \ \ $M_i^{(r,K)}\gets M_i^{(r-1,K)}$
+      \Comment{not sampled: unchanged}
+  \EndFor
+  \State $C^{(r+1)}\gets C^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}\big(C_i^{(r+1)}-C_i^{(r)}\big)$
+  \State $X^{(r+1)}\gets\tfrac{n-S}{n}X^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}X_i^{(r,K)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% ---------------------------------------------------------------- FedMARS-M
+\begin{algorithm}[H]
+\caption{FedMARS-M (our method): FedMuon $+$ MARS-M variance reduction \cite{marsm} $+$ Moonlight scaling \cite{moonlight} $+$ mean control variate}
+\begin{algorithmic}[1]
+\State \textbf{init} $X^{(0)}$, $C^{(0)}\!=\!0$, $C_i^{(0)}\!=\!0$, $M_i^{(-1,K)}\!=\!0$, $G_i\!=\!0$
+\State \textbf{const} $\gamma$ (MARS), $\lambda$ (weight decay), $\phi=0.2$, \ $d=\max(\text{rows},\text{cols})$
+\For{$r=0,\dots,R-1$}
+  \State sample $\mathcal{S}_r\subseteq[n]$; send $X^{(r)},C^{(r)}$ to $i\in\mathcal{S}_r$
+  \For{$i\in\mathcal{S}_r$ \textbf{in parallel}}
+    \State $X_i^{(r,0)}\gets X^{(r)}$; \ \ $M_i^{(r,0)}\gets M_i^{(r-1,K)}$; \ \ $\bar M\gets 0$
+    \For{$k=0,\dots,K-1$}
+      \State $g\gets\gF(X_i^{(r,k)};\xi)$
+      \State $c\gets g+\dfrac{\gamma(1-\alpha)}{\alpha}(g-G_i)$
+        \Comment{MARS variance-reduced gradient}
+      \State $G_i\gets g$
+      \State $M_i^{(r,k+1)}\gets(1-\alpha)M_i^{(r,k)}+\alpha\,c$; \ \ $\bar M\gets\bar M+\tfrac1K M_i^{(r,k+1)}$
+      \State $X_i^{(r,k+1)}\gets(1-\eta\lambda)X_i^{(r,k)}-\eta\,\phi\sqrt{d}\,\NS\big(M_i^{(r,k+1)}-C_i^{(r)}+C^{(r)}\big)$
+    \EndFor
+    \State $C_i^{(r+1)}\gets\bar M$
+      \Comment{\textbf{control variate}: mean momentum $\tfrac1K\sum_k M_i^{(r,k)}$ (SCAFFOLD-style)}
+  \EndFor
+  \For{$i\in[n]\setminus\mathcal{S}_r$}
+    \State $C_i^{(r+1)}\gets C_i^{(r)}$; \ \ $M_i^{(r,K)}\gets M_i^{(r-1,K)}$
+  \EndFor
+  \State $C^{(r+1)}\gets C^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}\big(C_i^{(r+1)}-C_i^{(r)}\big)$
+  \State $X^{(r+1)}\gets\tfrac{n-S}{n}X^{(r)}+\tfrac1n\sum_{i\in\mathcal{S}_r}X_i^{(r,K)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Summary of differences.}
+All control-variate methods share the same skeleton; they differ only in the local
+update and the control-variate line. SCAFFOLD uses SGD and the mean local gradient.
+FedMuon replaces SGD by the bias-corrected Muon/LMO step but takes the control variate
+to be the final momentum. FedMARS-M (i) feeds the momentum a MARS-M variance-reduced
+gradient, (ii) uses the Moonlight update scale $\phi\sqrt{d}$ with decoupled weight
+decay $\lambda$, and (iii) takes the control variate to be the mean momentum
+(SCAFFOLD-style). We drop MARS-M's unit-norm clip of $c$, which we found has no effect
+here since the global gradient clip already bounds the per-matrix norm.
+
+\begin{thebibliography}{9}
+\bibitem{fedavg} H.~B. McMahan, E.~Moore, D.~Ramage, S.~Hampson, B.~A. y~Arcas.
+  \textit{Communication-Efficient Learning of Deep Networks from Decentralized Data.} AISTATS 2017. arXiv:1602.05629.
+\bibitem{scaffold} S.~P. Karimireddy, S.~Kale, M.~Mohri, S.~Reddi, S.~U. Stich, A.~T. Suresh.
+  \textit{SCAFFOLD: Stochastic Controlled Averaging for Federated Learning.} ICML 2020. arXiv:1910.06378.
+\bibitem{fedmuon} Y.~Takezawa, A.~Koloskova, X.~Jiang, S.~U. Stich.
+  \textit{FedMuon: Federated Learning with Bias-corrected LMO-based Optimization.} arXiv:2509.26337, 2025.
+\bibitem{marsm} \textit{MARS-M: When Variance Reduction Meets Matrices.} arXiv:2510.21800, 2025.
+\bibitem{mars} H.~Yuan, et al. \textit{MARS: Unleashing the Power of Variance Reduction for Training Large Models.} arXiv:2411.10438, 2024.
+\bibitem{moonlight} J.~Liu, et al. \textit{Muon is Scalable for LLM Training.} arXiv:2502.16982, 2025.
+\end{thebibliography}
+
+\end{document}

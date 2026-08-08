@@ -1,0 +1,4 @@
+split: dirichlet_10    # mildly non-IID
+args:
+  client-split-mode: dirichlet
+  alphas: 10

@@ -1,0 +1,22 @@
+# Like-for-like upper bound for the Muon methods: Muon on one client holding ALL data
+# (control variates cancel exactly with a single client => pure centralized Muon).
+# Split-independent; overrides whatever split a suite uses. Tuned by its own stage
+# (scalar-lr 1e-6 measured equal within noise - flat landscape, optimum bracketed).
+method: centralized_muon
+args:
+  methods: fedmuon
+  num-clients: 1
+  client-split-mode: dirichlet
+  alphas: 1000000
+  mars-gamma: 0
+  muon-lr: 1.0e-3       # tuned: smaller than the federated 3e-3
+  scalar-lr: 3.0e-6
+  fed-beta: 0.95        # tuned: higher than the federated 0.8
+  cv-rule: mean
+  muon-scale: shape
+  muon-scale-const: 0.2
+  muon-exclude: preprocess.linear_pre,mlp_out.2
+  muon-lr-decay: cosine
+  muon-wd: 0.1
+
+# no per_split: always holds all data, one config for every split

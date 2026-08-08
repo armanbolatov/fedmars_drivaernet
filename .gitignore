@@ -1,0 +1,20 @@
+# data / heavy artifacts never enter the repo
+data/
+dataset/
+log/
+results*/runs/
+*.pk
+*.pkl
+*.pth
+*.pt
+*.npy
+*.npz
+*.so
+*.db
+__pycache__/
+.ipynb_checkpoints/
+.claude/
+# local working rules, not part of the deliverable
+CLAUDE.md
+*.out
+docs

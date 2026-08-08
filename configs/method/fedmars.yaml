@@ -1,0 +1,34 @@
+# FedMARS-M: FedMuon + MARS variance reduction. Identical to fedmuon except gamma.
+# gamma is an ABLATION variable (its ~5% effect is below single-run noise); 0.01 is
+# the proxy-best point, benchmark carries {0, 0.01, 0.04} with error bars.
+method: fedmars
+args:
+  methods: fedmuon
+  mars-gamma: 0.01
+  muon-lr: 3.0e-3
+  scalar-lr: 1.0e-5
+  fed-beta: 0.8
+  cv-rule: mean
+  muon-scale: shape
+  muon-scale-const: 0.2
+  muon-exclude: preprocess.linear_pre,mlp_out.2
+  muon-lr-decay: cosine
+  muon-wd: 0.1
+
+# per-distribution overrides: fedmuon_dir<alpha> LRs/beta + that alpha's gamma winner.
+per_split:
+  dirichlet_0.5:
+    muon-lr: 3.0e-3
+    scalar-lr: 1.0e-5
+    fed-beta: 0.8
+    mars-gamma: 0.1
+  dirichlet_10:
+    muon-lr: 3.0e-3
+    scalar-lr: 1.0e-5
+    fed-beta: 0.8
+    mars-gamma: 0.04
+  dirichlet_1000:
+    muon-lr: 3.0e-3
+    scalar-lr: 3.0e-5
+    fed-beta: 0.9
+    mars-gamma: 0.04

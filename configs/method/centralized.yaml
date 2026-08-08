@@ -1,0 +1,22 @@
+# Centralized upper bound: FedAvg with a single client holding all data
+# (aggregation of one client = plain sequential training).
+# The one client holds every body type, so a single_class split is impossible by
+# definition - this method carries its own trivial partition (dirichlet with one
+# client = all data to that client) and overrides whatever split the suite uses.
+method: centralized
+args:
+  methods: fedavg
+  num-clients: 1
+  client-split-mode: dirichlet
+  alphas: 1000000
+  # lr/beta from its OWN tuning stage (scripts/tune.py --stage centralized), not
+  # FedAvg's federated optimum - an undertuned upper bound would flatter federation.
+  # centralized_best.json: lr 3e-5, beta 0.9 (proxy 1.292e-3); single-LR convention
+  # (both param groups get the same value), as the tuning stage used.
+  lr: 3.0e-5
+  scalar-lr: 3.0e-5
+  weight-decay: 0.01
+  fed-beta: 0.9
+  muon-exclude: preprocess.linear_pre,mlp_out.2
+
+# no per_split: centralized always holds all data, one config for every split
