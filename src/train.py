@@ -146,9 +146,11 @@ def train_client_corrected(
     params = dict(model.named_parameters())
     model = fabric.setup_module(model)
 
+    micro = max(args.micro_batches, 1)
     loader = DataLoader(
         Subset(dataset, indices),
-        batch_size=args.batch_size,
+        # grad accumulation: same effective batch, peak memory / micro
+        batch_size=args.batch_size // micro,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=fabric.device.type == "cuda",
@@ -165,7 +167,7 @@ def train_client_corrected(
     local_c = {k: local_c_cpu[k].to(device) for k in params}
     global_c = {k: global_c_cpu[k].to(device) for k in params}
     use_mean_cv = method in ("scaffold", "scaffold_adam") or (
-        method == "fedmuon" and args.cv_rule == "mean"
+        method in ("fedmuon", "fedolion") and args.cv_rule == "mean"
     )
     grad_accum = (
         {k: torch.zeros_like(t) for k, t in momentum.items()} if use_mean_cv else None
@@ -181,11 +183,16 @@ def train_client_corrected(
             if args.max_client_batches and batch_idx >= args.max_client_batches:
                 break
             inputs, targets, others = data
-            for p in params.values():
-                p.grad = None
+            if batch_idx % micro == 0:
+                for p in params.values():
+                    p.grad = None
             outputs = model(inputs)
             loss, _ = loss_wrapper(inputs, outputs, targets, others)
-            fabric.backward(loss)
+            total_loss += float(loss.detach().cpu())
+            total_batches += 1
+            fabric.backward(loss / micro if micro > 1 else loss)
+            if (batch_idx + 1) % micro != 0:
+                continue          # keep accumulating; step on the group boundary
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
                     params.values(), max_norm=args.grad_clip, norm_type=2
@@ -195,8 +202,18 @@ def train_client_corrected(
                     grad = p.grad
                     if grad is None:
                         continue
+                    if method == "fedlion":
+                        # Lion: sign of the interpolated momentum; server averages
+                        # weights AND momentum (FedLion), no control variates
+                        m = momentum[name]
+                        upd = torch.sign(beta * m + (1.0 - beta) * grad)
+                        m.mul_(args.lion_beta2).add_(grad, alpha=1.0 - args.lion_beta2)
+                        if args.weight_decay > 0:
+                            p.mul_(1.0 - args.lion_lr * args.weight_decay)
+                        p.add_(upd, alpha=-args.lion_lr)
+                        continue
                     use_muon = (
-                        method == "fedmuon"
+                        method in ("fedmuon", "fedolion")
                         and args.muon_mode != "off"
                         and is_muon_param(name, p)
                     )
@@ -229,6 +246,10 @@ def train_client_corrected(
                                 args.muon_scale,
                                 args.muon_scale_const,
                             )
+                            if method == "fedolion":
+                                # OLion: entrywise sign of the orthogonalized
+                                # direction (spectral AND l_inf constraint)
+                                update = torch.sign(update) * args.muon_scale_const
                             p.add_(update.reshape(p.shape), alpha=-args.muon_lr_now)
                     elif method == "scaffold":
                         p.add_(corrected, alpha=-args.scaffold_lr)
@@ -239,7 +260,7 @@ def train_client_corrected(
                         vb.mul_(args.fed_beta2).addcmul_(
                             corrected, corrected, value=1.0 - args.fed_beta2
                         )
-                        if method == "fedmuon":
+                        if method in ("fedmuon", "fedolion"):
                             lr = args.scalar_lr
                         else:  # scaffold_adam: matrix params use scaffold_lr, rest scalar_lr
                             lr = args.scaffold_lr if is_muon_param(name, p) else args.scalar_lr
@@ -249,8 +270,6 @@ def train_client_corrected(
                     if grad_accum is not None:
                         grad_accum[name].add_(m)
             num_steps += 1
-            total_loss += float(loss.detach().cpu())
-            total_batches += 1
 
     if use_mean_cv:  # c_i <- mean momentum over the round (SCAFFOLD rule)
         new_local_c = {
@@ -310,7 +329,7 @@ def log_round_stats(args, method, alpha, round_idx, train_loss, agg_update,
            f"{getattr(args, 'muon_lr_now', float('nan')):.6e}", f"{seconds:.1f}",
            f"{torch.cuda.max_memory_reserved() / 2**30:.1f}")
     path = Path(args.output_dir) / "round_stats.csv"
-    # truncate at round 1: a relaunch after an OOM must not keep the dead attempt's rows
+    # round 1 starts a fresh stats file
     with path.open("w" if round_idx <= 1 else "a") as f:
         if f.tell() == 0:
             f.write(",".join(STAT_COLS) + "\n")
@@ -432,6 +451,15 @@ def run_corrected(
             losses.append(loss)
 
         state = base.state_plus_update(state, aggregate_update, scale=args.server_lr)
+        if method == "fedlion":  # FedLion also averages the momentum buffers
+            mean_m = {k: torch.zeros_like(t) for k, t in momentum[active_clients[0]].items()}
+            for cid in active_clients:
+                w = base.client_weight(cid, active_clients, clients, total_samples,
+                                       args.aggregation)
+                for k in mean_m:
+                    mean_m[k].add_(momentum[cid][k], alpha=w)
+            for cid in active_clients:
+                momentum[cid] = {k: t.clone() for k, t in mean_m.items()}
         for client_id in active_clients:
             local_c[client_id] = new_local_cs[client_id]
         weights = {
@@ -514,6 +542,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--micro-batches", type=int, default=1,
+                        help="split each batch into N accumulation steps")
+    parser.add_argument("--lion-lr", type=float, default=1e-4)
+    parser.add_argument("--lion-beta2", type=float, default=0.99)
     parser.add_argument("--eval-batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=16)
     # FedAvg client optimizer (AdamW, as in the base script)
@@ -618,9 +650,10 @@ def train_client_fedavg(base_state, dataset, indices, args, repo_cfg, fabric):
         weight_decay=args.weight_decay,
     )
     model, optimizer = fabric.setup(model, optimizer)
+    micro = max(args.micro_batches, 1)
     loader = DataLoader(
         torch.utils.data.Subset(dataset, indices),
-        batch_size=args.batch_size,
+        batch_size=args.batch_size // micro,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=fabric.device.type == "cuda",
@@ -635,15 +668,18 @@ def train_client_fedavg(base_state, dataset, indices, args, repo_cfg, fabric):
             if args.max_client_batches and batch_idx >= args.max_client_batches:
                 break
             inputs, targets, others = data
-            optimizer.zero_grad(set_to_none=True)
+            if batch_idx % micro == 0:
+                optimizer.zero_grad(set_to_none=True)
             outputs = model(inputs)
             loss, _ = loss_wrapper(inputs, outputs, targets, others)
-            fabric.backward(loss)
+            total_loss += float(loss.detach().cpu())
+            total_batches += 1
+            fabric.backward(loss / micro if micro > 1 else loss)
+            if (batch_idx + 1) % micro != 0:
+                continue
             if args.grad_clip > 0:
                 fabric.clip_gradients(model, optimizer, max_norm=args.grad_clip, norm_type=2)
             optimizer.step()
-            total_loss += float(loss.detach().cpu())
-            total_batches += 1
     local_state = model.state_dict()
     grad = {}
     for key, base_value in base_state.items():
@@ -719,7 +755,8 @@ def _precache_dataset(dataset):
 
 def main() -> None:
     args = parse_args()
-    valid_methods = {"fedavg", "scaffold", "scaffold_adam", "fedmuon"}
+    valid_methods = {"fedavg", "scaffold", "scaffold_adam", "fedmuon",
+                     "fedlion", "fedolion"}
     if not set(args.methods).issubset(valid_methods):
         raise ValueError(f"--methods must be a subset of {sorted(valid_methods)}")
     if args.eval_batch_size != 1:

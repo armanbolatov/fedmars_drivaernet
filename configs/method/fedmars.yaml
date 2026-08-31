@@ -1,13 +1,13 @@
-# FedMARS-M: FedMuon + MARS variance reduction. Identical to fedmuon except gamma.
-# gamma is an ABLATION variable (its ~5% effect is below single-run noise); 0.01 is
-# the proxy-best point, benchmark carries {0, 0.01, 0.04} with error bars.
+# FedMARS-M: FedMuon + MARS variance reduction on the matrix params. Tuned by its
+# own search at the reference gamma = 0.01; gamma itself is an ablation variable
+# (benchmark carries {0, 0.01, 0.04}).
 method: fedmars
 args:
   methods: fedmuon
   mars-gamma: 0.01
-  muon-lr: 3.0e-3
-  scalar-lr: 1.0e-5
-  fed-beta: 0.8
+  muon-lr: 3.0e-3       # tuned (24-config search, interior)
+  scalar-lr: 1.0e-5     # tuned
+  fed-beta: 0.9         # tuned (24-config search, interior)
   cv-rule: mean
   muon-scale: shape
   muon-scale-const: 0.2
@@ -15,20 +15,5 @@ args:
   muon-lr-decay: cosine
   muon-wd: 0.1
 
-# per-distribution overrides: fedmuon_dir<alpha> LRs/beta + that alpha's gamma winner.
-per_split:
-  dirichlet_0.5:
-    muon-lr: 3.0e-3
-    scalar-lr: 1.0e-5
-    fed-beta: 0.8
-    mars-gamma: 0.1
-  dirichlet_10:
-    muon-lr: 3.0e-3
-    scalar-lr: 1.0e-5
-    fed-beta: 0.8
-    mars-gamma: 0.04
-  dirichlet_1000:
-    muon-lr: 3.0e-3
-    scalar-lr: 3.0e-5
-    fed-beta: 0.9
-    mars-gamma: 0.04
+# per_split: the per-distribution muon-lr, from the evaluation-scale ladder
+# (tune_full.py); all other values transfer from the reference split.

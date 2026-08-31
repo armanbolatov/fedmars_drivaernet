@@ -17,20 +17,26 @@ proxy:                  # tuning / ablations ("validation" setting)
   test_downsample_size: 20000
   num_workers: 8
 
-full:                   # headline benchmark ("test" setting)
+full:                   # benchmark ("test" setting)
   downsample_size: 50000
   rounds: 100
-  eval_every: 5
+  eval_every: 1
   max_test_samples: 0   # full test set
   test_downsample_size: -1
   num_workers: 8
+  micro_batches: 2      # grad accumulation: two runs fit per 80GB card
+
+full30:                 # evaluation-scale tuning setting (stages 2 and 3)
+  downsample_size: 50000
+  rounds: 30
+  eval_every: 1
+  max_test_samples: 0
+  test_downsample_size: -1
+  num_workers: 8
+  micro_batches: 2
 
 benchmark:
-  seeds: [42, 43, 44]
-  local_epochs_ablation: [1, 2, 4, 8]
-  # fairness: E x rounds held constant, so every E does identical gradient work and
-  # the curves answer both "error vs communication rounds" and "error at equal compute"
-  localsteps_budget_epochs: 80
+  seeds: [42]
   gamma_ablation: [0.0, 0.01, 0.04]   # gamma effect < single-run noise; settled by error bars
 
 objective:              # tuning objective

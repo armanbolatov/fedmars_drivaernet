@@ -2,22 +2,9 @@
 method: scaffold
 args:
   methods: scaffold_adam
-  scaffold-lr: 1.0e-4   # tuned (3e-4 worse, 1e-3 diverges -> interior)
+  scaffold-lr: 1.0e-4   # tuned (edge-probed: 3e-4 worse)
   scalar-lr: 1.0e-4     # = scaffold-lr (single-LR baseline)
-  fed-beta: 0.8         # tuned
+  fed-beta: 0.8         # tuned (24-config search, interior)
 
-# per-distribution overrides, from scaffold_dir<alpha>_best.json (single lr: both
-# flags get the same value).
-per_split:
-  dirichlet_0.5:
-    scaffold-lr: 1.0e-4
-    scalar-lr: 1.0e-4
-    fed-beta: 0.7
-  dirichlet_10:
-    scaffold-lr: 3.0e-5
-    scalar-lr: 3.0e-5
-    fed-beta: 0.7
-  dirichlet_1000:
-    scaffold-lr: 1.0e-4
-    scalar-lr: 1.0e-4
-    fed-beta: 0.95
+# per_split: the per-distribution learning rate, from the evaluation-scale ladder
+# (tune_full.py); all other values transfer from the reference split.

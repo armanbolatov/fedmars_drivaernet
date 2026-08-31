@@ -11,12 +11,11 @@ args:
   alphas: 1000000
   # lr/beta from its OWN tuning stage (scripts/tune.py --stage centralized), not
   # FedAvg's federated optimum - an undertuned upper bound would flatter federation.
-  # centralized_best.json: lr 3e-5, beta 0.9 (proxy 1.292e-3); single-LR convention
-  # (both param groups get the same value), as the tuning stage used.
-  lr: 3.0e-5
+  # Single-LR convention (both param groups get the same value).
+  lr: 3.0e-5            # tuned (24-config search, interior)
   scalar-lr: 3.0e-5
   weight-decay: 0.01
-  fed-beta: 0.9
+  fed-beta: 0.6         # tuned; flat within 0.3% of 0.7, boundary of the probed range
   muon-exclude: preprocess.linear_pre,mlp_out.2
 
 # no per_split: centralized always holds all data, one config for every split

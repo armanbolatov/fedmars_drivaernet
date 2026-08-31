@@ -3,23 +3,11 @@
 method: fedavg
 args:
   methods: fedavg
-  lr: 1.0e-3            # tuned (3e-3 worse, 1e-2 diverges -> interior)
-  scalar-lr: 1.0e-3     # = lr (single-LR baseline)
+  lr: 1.0e-4            # tuned (24-config search, interior)
+  scalar-lr: 1.0e-4     # = lr (single-LR baseline)
   weight-decay: 0.01
-  fed-beta: 0.9         # tuned
+  fed-beta: 0.7         # tuned (edge-probed: 0.6 worse)
   muon-exclude: preprocess.linear_pre,mlp_out.2   # param-group split kept consistent
 
-# per-distribution overrides, from fedavg_dir<alpha>_best.json (single lr).
-per_split:
-  dirichlet_0.5:
-    lr: 1.0e-5
-    scalar-lr: 1.0e-5
-    fed-beta: 0.99
-  dirichlet_10:
-    lr: 1.0e-4
-    scalar-lr: 1.0e-4
-    fed-beta: 0.9
-  dirichlet_1000:
-    lr: 1.0e-5
-    scalar-lr: 1.0e-5
-    fed-beta: 0.7
+# per_split: the per-distribution learning rate, from the evaluation-scale ladder
+# (tune_full.py); all other values transfer from the reference split.

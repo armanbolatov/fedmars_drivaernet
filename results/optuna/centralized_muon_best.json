@@ -1,0 +1,7 @@
+{
+  "muon_lr": 0.001,
+  "scalar_lr": 1e-05,
+  "fed_beta": 0.95,
+  "value": 0.000371886,
+  "edge_warnings": []
+}

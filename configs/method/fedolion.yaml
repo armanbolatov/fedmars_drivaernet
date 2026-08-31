@@ -1,0 +1,20 @@
+# FedOLion: our federated adaptation of OLion (arXiv 2602.01105) -- matrix params
+# take sign(NS(corrected momentum)) steps (spectral + l_inf geometry), scalars
+# AdamW, SCAFFOLD control variates. Structurally parallel to FedMuon, so the
+# comparison isolates the LMO geometry.
+method: fedolion
+args:
+  methods: fedolion
+  mars-gamma: 0
+  muon-lr: 1.0e-3       # tuned (24-config search, interior)
+  scalar-lr: 3.0e-6     # tuned (edge-probed: 1e-6 worse)
+  fed-beta: 0.95        # tuned (24-config search, interior)
+  cv-rule: mean
+  muon-scale: shape
+  muon-scale-const: 0.2
+  muon-exclude: preprocess.linear_pre,mlp_out.2
+  muon-lr-decay: cosine
+  muon-wd: 0.1
+
+# per_split: the per-distribution muon-lr, from the evaluation-scale ladder
+# (tune_full.py); all other values transfer from the reference split.

@@ -1,0 +1,7 @@
+{
+  "lion_lr": 0.0003,
+  "fed_beta": 0.8,
+  "lion_beta2": 0.95,
+  "value": 0.0015936199999999998,
+  "edge_warnings": []
+}

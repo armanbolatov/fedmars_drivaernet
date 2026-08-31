@@ -1,0 +1,8 @@
+{
+  "scaffold_lr": 0.0001,
+  "fed_beta": 0.8,
+  "value": 0.0012616200000000002,
+  "edge_warnings": [
+    "EDGE HIT: scaffold_lr=0.0001 is a ladder endpoint - extend scaffold_lr and rerun"
+  ]
+}

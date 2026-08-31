@@ -17,4 +17,8 @@ __pycache__/
 # local working rules, not part of the deliverable
 CLAUDE.md
 *.out
-docs
+# docs are local working notes; only the algorithm statements ship
+docs/*
+!docs/algorithms.tex
+# one-off method configs written by the ladder walks
+configs/method/*_lr*.yaml

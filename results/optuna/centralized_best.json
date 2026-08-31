@@ -1,0 +1,8 @@
+{
+  "lr": 3e-05,
+  "fed_beta": 0.7,
+  "value": 0.0009330120000000001,
+  "edge_warnings": [
+    "EDGE HIT: fed_beta=0.7 is a ladder endpoint - extend fed_beta and rerun"
+  ]
+}

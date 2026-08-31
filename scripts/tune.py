@@ -34,15 +34,15 @@ TRIAL_TIMEOUT = 4 * 3600
 N_TAIL = 5           # objective = mean c_d of the last N evaluated rounds
 AUDIT = ("c_l_mae", "rel_l2_p", "rel_l2_wss")
 
-# 1e-x/3e-x ladders; *_EXT probe one step beyond an edge, certified via EXT_UNION.
+# 1e-x/3e-x ladders. WIDE holds one rung beyond each end, for --probe-edges.
 MUON_LR = [3e-4, 1e-3, 3e-3, 1e-2, 3e-2]
 MUON_SCALAR = [3e-6, 1e-5, 3e-5, 1e-4, 3e-4]
 SCAF_LR = [1e-6, 3e-6, 1e-5, 3e-5, 1e-4]
 FEDAVG_LR = [1e-5, 3e-5, 1e-4, 3e-4, 1e-3]
+LION_LR = [1e-5, 3e-5, 1e-4, 3e-4, 1e-3]
+LION_B2 = [0.9, 0.95, 0.99, 0.995]
 BETA = [0.7, 0.8, 0.9, 0.95, 0.99]
 GAMMA = [0.01, 0.025, 0.04, 0.1, 1.0]
-SCAF_LR_EXT, FEDAVG_LR_EXT = [3e-4, 1e-3], [3e-3, 1e-2]
-GAMMA_EXT, BETA_EXT, BETA_LOW = [0.001, 0.003], [0.8, 0.9], [0.6, 0.7]
 
 ALPHA = None         # --alpha: Dirichlet concentration; None = natural single_class split
 PROBE = False        # --probe-edges: bracket a study's edge params one rung outward
@@ -55,26 +55,21 @@ WIDE = {
     "lr": [3e-6] + FEDAVG_LR + [3e-3, 1e-2],
     "fed_beta": [0.6] + BETA + [0.995],
     "mars_gamma": [0.003] + GAMMA + [3.0],
+    "lion_lr": [3e-6] + LION_LR + [3e-3],
+    "lion_beta2": [0.8] + LION_B2 + [0.999],
 }
 
 SPACES = {
     "fedmuon": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
+    "fedmars": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
+    "fedlion": {"lion_lr": LION_LR, "fed_beta": BETA, "lion_beta2": LION_B2},
+    "fedolion": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
     "scaffold": {"scaffold_lr": SCAF_LR, "fed_beta": BETA},
     "fedavg": {"lr": FEDAVG_LR, "fed_beta": BETA},
     "centralized": {"lr": FEDAVG_LR, "fed_beta": BETA},
     "centralized_muon": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
     "gamma": {"mars_gamma": GAMMA},
-    "scaffold_ext": {"scaffold_lr": SCAF_LR_EXT, "fed_beta": BETA_EXT},
-    "fedavg_ext": {"lr": FEDAVG_LR_EXT, "fed_beta": BETA_EXT},
-    "gamma_ext": {"mars_gamma": GAMMA_EXT},
-    "fedmuon_ext": {"fed_beta": BETA_LOW},
     "smoke": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
-}
-EXT_UNION = {  # an ext winner is interior/edge relative to base+ext combined
-    "scaffold_ext": {"scaffold_lr": sorted(SCAF_LR + SCAF_LR_EXT), "fed_beta": BETA},
-    "fedavg_ext": {"lr": sorted(FEDAVG_LR + FEDAVG_LR_EXT), "fed_beta": BETA},
-    "gamma_ext": {"mars_gamma": sorted(GAMMA + GAMMA_EXT)},
-    "fedmuon_ext": {"fed_beta": sorted(set(BETA + BETA_LOW))},
 }
 
 PROXY = ["--downsample-size", "6000", "--rounds", "20", "--eval-every", "1",
@@ -124,6 +119,17 @@ def reference_params(stage):
     return {k: v for k, v in load_best(stage).items() if k in SPACES[stage]}
 
 
+# per-alpha studies start from the method's own single_class optimum
+REFERENCE_SEEDED = ("fedmuon", "fedmars", "scaffold", "fedavg", "fedlion",
+                    "fedolion", "centralized")
+
+
+def distinct(study):
+    """Configurations actually trained -- repeats reuse a cached score."""
+    return len({tuple(sorted(t.params.items())) for t in study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE})
+
+
 def build_cmd(stage, p, outdir, rounds=0):
     proxy = list(PROXY)
     if rounds:
@@ -131,8 +137,7 @@ def build_cmd(stage, p, outdir, rounds=0):
     cmd = [PY, SCRIPT, "--output-dir", str(outdir)] + proxy
     if ALPHA is not None:
         cmd += ["--client-split-mode", "dirichlet", "--alphas", repr(ALPHA)]
-    key = {"scaffold_ext": "scaffold", "fedavg_ext": "fedavg", "gamma_ext": "gamma",
-           "smoke": "fedmuon"}.get(stage, stage)
+    key = {"smoke": "fedmuon"}.get(stage, stage)
     if key == "scaffold":  # single lr: same value for both param groups
         cmd += ["--methods", "scaffold_adam", "--grad-clip", "1.0",
                 "--scaffold-lr", repr(p["scaffold_lr"]), "--scalar-lr", repr(p["scaffold_lr"]),
@@ -142,13 +147,26 @@ def build_cmd(stage, p, outdir, rounds=0):
                 "--fed-beta", repr(p["fed_beta"])] + ADAMW
         if key == "centralized":
             cmd += ONE_CLIENT
+    elif key == "fedlion":  # Lion clients; server averages weights + momentum
+        cmd += ["--methods", "fedlion", "--grad-clip", "1.0", "--weight-decay", "0.01",
+                "--lion-lr", repr(p["lion_lr"]), "--fed-beta", repr(p["fed_beta"]),
+                "--lion-beta2", repr(p["lion_beta2"])]
+    elif key == "fedolion":  # sign(NS(m)) matrix step, otherwise the Muon recipe
+        cmd += ["--methods", "fedolion", "--mars-gamma", "0"] + MUON_FIXED + [
+            "--muon-lr", repr(p["muon_lr"]), "--scalar-lr", repr(p["scalar_lr"]),
+            "--fed-beta", repr(p["fed_beta"])]
+    elif key == "fedmars":  # same space as FedMuon at the reference gamma; gamma ablated apart
+        cmd += ["--methods", "fedmuon"] + MUON_FIXED + [
+            "--muon-lr", repr(p["muon_lr"]), "--scalar-lr", repr(p["scalar_lr"]),
+            "--fed-beta", repr(p["fed_beta"]), "--mars-gamma", "0.01"]
     elif key == "centralized_muon":  # Muon ceiling: one client, all data, cv cancels
         cmd += ["--methods", "fedmuon", "--mars-gamma", "0"] + ONE_CLIENT + MUON_FIXED + [
             "--muon-lr", repr(p["muon_lr"]), "--scalar-lr", repr(p["scalar_lr"]),
             "--fed-beta", repr(p["fed_beta"])]
-    else:  # fedmuon / gamma / fedmuon_ext share the Muon recipe
-        ref = "fedmuon" if ALPHA is None else f"fedmuon_dir{ALPHA:g}"
-        base = load_best(ref) if key in ("gamma", "fedmuon_ext") else p
+    else:  # fedmuon and the gamma ablation share the Muon recipe
+        base_stage = "fedmars" if key == "gamma" else "fedmuon"
+        ref = base_stage if ALPHA is None else f"{base_stage}_dir{ALPHA:g}"
+        base = load_best(ref) if key == "gamma" else p
         cmd += ["--methods", "fedmuon"] + MUON_FIXED + [
             "--muon-lr", repr(base["muon_lr"]), "--scalar-lr", repr(base["scalar_lr"]),
             "--fed-beta", repr(p.get("fed_beta", base["fed_beta"])),
@@ -251,7 +269,7 @@ def objective(trial, stage, rounds=0):
 
 def edge_check(study):
     stage = study.study_name.rsplit("_", 1)[0]
-    ladders = EXT_UNION.get(stage) or SPACES.get(stage, {})
+    ladders = SPACES.get(stage, {})
     warns = [f"EDGE HIT: {k}={v} is a ladder endpoint - extend {k} and rerun"
              for k, v in study.best_params.items()
              if (lad := ladders.get(k)) and v in (min(lad), max(lad))]
@@ -288,7 +306,8 @@ def main():
     global ALPHA, PROBE
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True, choices=sorted(SPACES))
-    ap.add_argument("--n-trials", type=int, default=24, help="TOTAL trial budget")
+    ap.add_argument("--n-trials", type=int, default=24,
+                    help="distinct configurations to train (same for every method)")
     ap.add_argument("--rounds", type=int, default=0, help="override rounds (smoke)")
     ap.add_argument("--alpha", type=float, default=None,
                     help="Dirichlet concentration; omit for the single_class split")
@@ -301,16 +320,16 @@ def main():
         sys.exit("centralized holds all data - split-independent, tune once without --alpha")
     OPTDIR.mkdir(parents=True, exist_ok=True)
 
-    grid_stages = {s for s in SPACES if s.endswith("_ext")} | {"gamma"}
-    if args.stage in grid_stages:
+    if args.stage == "gamma":       # small one-dimensional ablation: run the grid
         sampler, pruner = GridSampler(SPACES[args.stage]), NopPruner()
     elif args.stage == "smoke":
         sampler = TPESampler(seed=42)
         pruner = MedianPruner(n_startup_trials=1, n_warmup_steps=1, interval_steps=1)
     else:
-        sampler = TPESampler(seed=42, n_startup_trials=8)
-        # single Hyperband bracket, halving at round 10: earlier rankings are unreliable
-        pruner = HyperbandPruner(min_resource=10, max_resource=20, reduction_factor=3)
+        sampler = TPESampler(seed=42, n_startup_trials=10)
+        # every method spends its budget on the same number of fully trained configs,
+        # so nothing is discarded on round-10 rankings, which cross over on this task
+        pruner = NopPruner()
 
     tag = "b32" if ALPHA is None else f"dir{ALPHA:g}"
     name = f"{args.stage}_probe_{tag}" if PROBE else f"{args.stage}_{tag}"
@@ -322,7 +341,6 @@ def main():
                            engine_kwargs={"connect_args": {"timeout": 60}}),
         sampler=sampler, pruner=pruner)
 
-    budget = args.n_trials
     if PROBE:
         cfgs = probe_configs(args.stage, tag)
         if not cfgs:
@@ -331,18 +349,26 @@ def main():
         if not study.trials:
             for c in cfgs:
                 study.enqueue_trial(c)
-        budget = len(cfgs)
-    finished = [t for t in study.trials
-                if t.state.name in ("COMPLETE", "PRUNED", "FAIL")]
-    remaining = max(0, budget - len(finished))
-    print(f"{name}: {len(finished)} trials recorded, running {remaining} more", flush=True)
-    if remaining:
-        if (not PROBE and ALPHA is not None and not study.trials
-                and args.stage in ("fedmuon", "scaffold", "fedavg")):
-            study.enqueue_trial(reference_params(args.stage))  # seed = reference optimum
-        study.optimize(lambda t: objective(t, args.stage, args.rounds),
-                       n_trials=remaining)
-    export(study, name.replace("_b32", "") if not PROBE and ALPHA is None else name)
+        done = [t for t in study.trials if t.state.name in ("COMPLETE", "PRUNED", "FAIL")]
+        if len(done) < len(cfgs):
+            study.optimize(lambda t: objective(t, args.stage, args.rounds),
+                           n_trials=len(cfgs) - len(done))
+        export(study, name)
+        return
+
+    # the budget is DISTINCT configurations, identical for every method: a repeat
+    # proposal returns the cached score and does not spend it
+    space = 1
+    for lad in SPACES[args.stage].values():
+        space *= len(lad)
+    budget = min(args.n_trials, space)
+    if not study.trials and ALPHA is not None and args.stage in REFERENCE_SEEDED:
+        study.enqueue_trial(reference_params(args.stage))  # seed = reference optimum
+    while distinct(study) < budget and len(study.trials) < 10 * budget:
+        print(f"{name}: {distinct(study)}/{budget} distinct configs", flush=True)
+        study.optimize(lambda t: objective(t, args.stage, args.rounds), n_trials=1)
+    print(f"{name}: {distinct(study)}/{budget} distinct configs evaluated", flush=True)
+    export(study, name.replace("_b32", "") if ALPHA is None else name)
 
 
 if __name__ == "__main__":

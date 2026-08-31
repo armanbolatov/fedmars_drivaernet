@@ -1,0 +1,11 @@
+# FedLion (Tang et al.): local Lion steps, server averages weights and momentum.
+method: fedlion
+args:
+  methods: fedlion
+  lion-lr: 3.0e-4       # tuned (24-config search, interior)
+  fed-beta: 0.8         # Lion beta1 (sign interpolation)
+  lion-beta2: 0.95
+  weight-decay: 0.01
+
+# per_split: the per-distribution lion-lr, from the evaluation-scale ladder
+# (tune_full.py); all other values transfer from the reference split.

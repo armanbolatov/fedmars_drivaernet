@@ -1,0 +1,9 @@
+{
+  "muon_lr": 0.001,
+  "scalar_lr": 3e-06,
+  "fed_beta": 0.95,
+  "value": 0.000639282,
+  "edge_warnings": [
+    "EDGE HIT: scalar_lr=3e-06 is a ladder endpoint - extend scalar_lr and rerun"
+  ]
+}
