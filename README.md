@@ -86,7 +86,9 @@ Selections land in `results/tune_full_<method>.json`, `tune_epochs_<method>.json
 `tune_rebracket_<method>.json`, each recording every rung evaluated. `benchmark.py` reads
 them directly, so those files are the tuning of record.
 
-Runs are resumable (an existing `summary.csv` is skipped) and one `benchmark.py` drives
+A run checkpoints its full state after every round (`checkpoint_<method>_alpha<a>.pt`,
+removed on completion) and continues from it if restarted, reproducing the uninterrupted
+run. Finished rows (an existing `summary.csv`) are skipped and one `benchmark.py` drives
 one GPU. `scripts/status.py` prints live runs, ladder state and benchmark coverage.
 
 [cfd_transformer]: ../cfd_transformer

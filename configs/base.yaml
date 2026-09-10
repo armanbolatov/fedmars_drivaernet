@@ -38,6 +38,7 @@ full30:                 # evaluation-scale tuning setting (stages 2 and 3)
 benchmark:
   seeds: [42]
   gamma_ablation: [0.0, 0.01, 0.04]   # gamma effect < single-run noise; settled by error bars
+  clients_per_round: [1, 2, 3]        # partial participation; 6 = full (the headline rows)
 
 objective:              # tuning objective
   metric: c_d_mae       # headline quantity; field loss decouples from drag on this task

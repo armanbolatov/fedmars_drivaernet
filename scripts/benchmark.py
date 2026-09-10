@@ -79,7 +79,7 @@ def tuned_lr(method, split, local_epochs):
 
 
 def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, outdir,
-              method=None):
+              method=None, clients_per_round=None):
     args = {}
     args.update({k.replace("_", "-"): v for k, v in base["protocol"].items()})
     args.update({k.replace("_", "-"): v for k, v in base[setting].items()})
@@ -98,6 +98,8 @@ def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, o
     args["local-epochs"] = local_epochs
     if gamma is not None:
         args["mars-gamma"] = gamma
+    if clients_per_round is not None:
+        args["clients-per-round"] = clients_per_round
     args["output-dir"] = str(outdir)
     cmd = [PY, TRAIN]
     for k, v in args.items():
@@ -110,7 +112,7 @@ def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, o
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--suite", choices=["headline", "splits", "gamma"])
+    ap.add_argument("--suite", choices=["headline", "splits", "gamma", "participation"])
     ap.add_argument("--setting", choices=["proxy", "full", "full30"], default="full")
     ap.add_argument("--methods", nargs="+")
     ap.add_argument("--splits", nargs="+", default=["single_class"])
@@ -127,7 +129,8 @@ def main():
 
     base = load(CFG / "base.yaml")
     seeds = a.seeds or base["benchmark"]["seeds"]
-    methods, splits, epochs, gammas = a.methods, a.splits, a.local_epochs, [None]
+    methods, splits, epochs = a.methods, a.splits, a.local_epochs
+    gammas, samplings = [None], [None]
 
     federated = ["fedavg", "scaffold", "fedlion", "fedmuon", "fedmars", "fedolion"]
     if a.suite == "headline":       # main table: natural split, each method at its
@@ -139,6 +142,9 @@ def main():
     elif a.suite == "gamma":        # does MARS help on top of tuned FedMuon?
         methods = ["fedmars"]
         gammas = base["benchmark"]["gamma_ablation"]
+    elif a.suite == "participation":  # clients sampled per round, each method at its
+        methods = methods or federated  # tuned local epochs; K=6 is the headline row
+        samplings = base["benchmark"]["clients_per_round"]
     if not methods:
         sys.exit("give --suite or --methods")
 
@@ -150,29 +156,45 @@ def main():
         return int(json.loads(path.read_text())[0]["best"])
 
     todo, skipped = [], 0
-    for m, sp, e, s, g in itertools.product(methods, splits, epochs, seeds, gammas):
-        if a.suite == "headline":
+    for m, sp, e, s, g, k in itertools.product(methods, splits, epochs, seeds, gammas,
+                                               samplings):
+        if a.suite in ("headline", "participation"):
             e = 1 if m.startswith("centralized") else tuned_epochs(m)
-        tag = f"{m}_E{e}_s{s}" + (f"_g{g:g}" if g is not None else "")
+        tag = (f"{m}_E{e}" + (f"_K{k}" if k is not None else "") + f"_s{s}"
+               + (f"_g{g:g}" if g is not None else ""))
         outdir = ROOT / "results" / "runs" / a.setting / sp / tag
         if (outdir / "summary.csv").exists():
             skipped += 1
             continue
-        todo.append((m, sp, e, s, g, outdir))
+        todo.append((m, sp, e, s, g, k, outdir))
 
     # a run peaks at ~31 GiB; per-card concurrency is set by --slots
     need_mib = (a.min_free_gb or {"full": 35, "full30": 35}.get(a.setting, 18)) * 1024
     failed = []
     print(f"{len(todo)} runs to do, {skipped} already done", flush=True)
-    for i, (m, sp, e, s, g, outdir) in enumerate(todo, 1):
+    for i, (m, sp, e, s, g, k, outdir) in enumerate(todo, 1):
         cmd = build_cmd(base, load(CFG / "method" / f"{m}.yaml"),
                         load(CFG / "split" / f"{sp}.yaml"), a.setting, s, e, g, outdir,
-                        method=m)
+                        method=m, clients_per_round=k)
         print(f"[{i}/{len(todo)}] {outdir.relative_to(ROOT)}", flush=True)
         if a.dry_run:
             print("   ", " ".join(cmd), flush=True)
             continue
         outdir.mkdir(parents=True, exist_ok=True)
+        newest = max((f.stat().st_mtime for f in outdir.iterdir() if f.name != ".lock"),
+                     default=0)
+        if time.time() - newest < 1800:
+            print("    in progress (fresh output), skipping", flush=True)
+            failed.append(str(outdir.relative_to(ROOT)))
+            continue
+        claim = (outdir / ".lock").open("w")   # one writer per row, across runners
+        try:
+            fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("    in progress elsewhere, skipping", flush=True)
+            claim.close()
+            failed.append(str(outdir.relative_to(ROOT)))
+            continue
         slot = acquire_slot(a.gpu, a.slots, need_mib)
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=a.gpu,
                    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
@@ -180,7 +202,8 @@ def main():
             r = subprocess.run(cmd, cwd=str(ROOT), env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:
-            slot.close()               # releases the lock
+            slot.close()               # releases the card slot
+            claim.close()              # and the row
         print(f"    exit {r.returncode}", flush=True)
         if r.returncode:
             failed.append(str(outdir.relative_to(ROOT)))

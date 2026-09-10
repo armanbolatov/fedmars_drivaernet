@@ -5,6 +5,7 @@
 
 Drawn for whatever exists, so this is safe to run mid-campaign:
   heterogeneity  error against client heterogeneity, at one local epoch
+  participation_* error against rounds and against client uploads, per K
   local_epochs   error against the local-epoch budget
   convergence    error against communication round (needs benchmark runs)
   ladders        every learning rate walked (appendix; selection is on c_d)
@@ -102,12 +103,19 @@ def selections(stem):
     return out
 
 
+def history_rows(run):
+    """The whole-body evaluation rows of a run, or [] if it has none."""
+    if not (run / "history.csv").exists():
+        return []
+    return [r for r in csv.DictReader((run / "history.csv").open())
+            if r.get("body") == "all"]
+
+
 def scores(run, lo=20, hi=30):
     """Mean of each metric over the evaluations in rounds [lo, hi]."""
     if not (run / "summary.csv").exists():
         return {}
-    rows = [r for r in csv.DictReader((run / "history.csv").open())
-            if r.get("body") == "all" and lo <= int(r["round"]) <= hi]
+    rows = [r for r in history_rows(run) if lo <= int(r["round"]) <= hi]
     out = {}
     for key, _ in METRICS:
         vals = [float(r[key]) for r in rows if r.get(key) not in (None, "", "nan")]
@@ -232,12 +240,10 @@ def fig_convergence():
     for m in ORDER:
         e = 1 if m in CEILINGS else tuned_epochs(m)
         run = base / f"{m}_E{e}_s42"
-        if e is None or not (run / "history.csv").exists():
+        if e is None:
             continue
         pts = []
-        for r in csv.DictReader((run / "history.csv").open()):
-            if r.get("body") != "all":
-                continue
+        for r in history_rows(run):
             vals = {k: float(r[k]) for k, _ in METRICS
                     if r.get(k) not in (None, "", "nan")}
             if vals:
@@ -246,6 +252,75 @@ def fig_convergence():
             series[m] = sorted(pts)
     two_panel("convergence",
               "communication round", series, sparse_markers=True)
+
+
+def curve(run, key="c_d_mae"):
+    """(round, value) per evaluated round of a benchmark run, or [] if unfinished."""
+    if not (run / "summary.csv").exists():
+        return []
+    return sorted((int(r["round"]), float(r[key])) for r in history_rows(run)
+                  if r.get(key) not in (None, "", "nan"))
+
+
+def fig_participation():
+    """Clients per round K on the reference split, each method at its tuned local
+    epochs (K=6 is the headline row): one panel per method, K on the ordered viridis
+    ramp, the centralized ceilings in gray. Drawn twice -- against communication
+    rounds, and against cumulative client uploads (K per round; a centralized model
+    uploads nothing, so it is a horizontal line there)."""
+    base = RUNS / "full" / "single_class"
+    ks = (1, 2, 3, 6)
+    colours = [matplotlib.cm.viridis(t) for t in np.linspace(0.05, 0.8, len(ks))]
+    methods = [m for m in ORDER if m not in CEILINGS]
+    data = {m: {k: curve(base / (f"{m}_E{tuned_epochs(m)}_s42" if k == 6
+                                 else f"{m}_E{tuned_epochs(m)}_K{k}_s42"))
+                for k in ks} for m in methods}
+    ceilings = {m: curve(base / f"{m}_E1_s42") for m in CEILINGS}
+    if not any(pts for d in data.values() for pts in d.values()):
+        return
+    for name, xlabel, xof in (("participation_rounds", "communication round",
+                               lambda k, r: r),
+                              ("participation_comm", "client uploads (cumulative)",
+                               lambda k, r: k * r)):
+        fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.0), constrained_layout=True)
+        fig.get_layout_engine().set(w_pad=0.05, h_pad=0.06, wspace=0.03, hspace=0.05)
+        rows = []
+        for i, (ax, m) in enumerate(zip(axes.flat, methods)):
+            for k, colour in zip(ks, colours):
+                pts = data[m][k]
+                if not pts:
+                    continue
+                xs = [xof(k, r) for r, _ in pts]
+                ax.plot(xs, [v for _, v in pts], color=colour, zorder=3)
+                step = max(1, len(xs) // 6)
+                ax.scatter(xs[::step], [v for _, v in pts][::step], s=18, color=colour,
+                           zorder=4)
+                rows += [[m, k, r, xof(k, r), v] for r, v in pts]
+            for c, pts in ceilings.items():
+                if not pts:
+                    continue
+                label, colour, _, ls = SERIES[c]
+                if name == "participation_rounds":
+                    ax.plot([r for r, _ in pts], [v for _, v in pts], color=colour,
+                            ls=ls, zorder=2)
+                else:                     # no uploads: its final level is the reference
+                    ax.axhline(sum(v for _, v in pts[-5:]) / 5, color=colour, ls=ls,
+                               zorder=2)
+            log_y(ax)
+            if name == "participation_comm":
+                ax.set_xscale("log")
+            ax.set_title(SERIES[m][0], loc="left", fontsize=10)
+            if i % 3 == 0:
+                ax.set_ylabel(METRICS[0][1], fontsize=9)
+            if i >= 3:
+                ax.set_xlabel(xlabel, fontsize=9)
+        handles = [Line2D([], [], color=c, marker="o", ms=4,
+                          label=f"K = {k}" + (" (full)" if k == 6 else ""))
+                   for k, c in zip(ks, colours)]
+        handles += [Line2D([], [], color=SERIES[c][1], ls=SERIES[c][3],
+                           label=SERIES[c][0]) for c in CEILINGS if ceilings[c]]
+        fig.legend(handles=handles, loc="outside lower center", ncols=len(handles))
+        save(fig, name, rows, ["method", "clients_per_round", "round", "x", "c_d_mae"])
 
 
 def fig_ladders():
@@ -304,5 +379,6 @@ def fig_ladders():
 
 if __name__ == "__main__":
     print("figures ->", OUT)
-    for fn in (fig_heterogeneity, fig_local_epochs, fig_convergence, fig_ladders):
+    for fn in (fig_heterogeneity, fig_local_epochs, fig_convergence, fig_ladders,
+               fig_participation):
         fn()

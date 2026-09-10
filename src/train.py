@@ -28,6 +28,7 @@ FedAvg loop. Set ``CFD_ROOT`` env var if cfd_transformer is not in ``~``.
 import argparse
 import json
 import math
+import random
 import time
 import os
 import sys
@@ -336,6 +337,48 @@ def log_round_stats(args, method, alpha, round_idx, train_loss, agg_update,
         f.write(",".join(str(x) for x in row) + "\n")
 
 
+def checkpoint_path(args, method, alpha):
+    return Path(args.output_dir) / f"checkpoint_{method}_alpha{alpha:g}.pt"
+
+
+def save_checkpoint(path, round_idx, history, **buffers):
+    """Everything a resumed run needs to continue exactly as an uninterrupted one."""
+    rng = {"python": random.getstate(), "numpy": np.random.get_state(),
+           "torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all()}
+    tmp = path.with_suffix(".tmp")
+    torch.save({"round": round_idx, "history": history, "rng": rng, **buffers}, tmp)
+    tmp.replace(path)
+
+
+def load_checkpoint(path, args):
+    """Restore the run's checkpoint if there is one; None means a fresh start."""
+    if not path.exists():
+        return None
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    random.setstate(ckpt["rng"]["python"])
+    np.random.set_state(ckpt["rng"]["numpy"])
+    torch.set_rng_state(ckpt["rng"]["torch"])
+    torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
+    stats = Path(args.output_dir) / "round_stats.csv"
+    if stats.exists():        # drop rounds logged after the checkpoint was written
+        lines = stats.read_text().splitlines(keepends=True)
+        kept = [l for l in lines[1:] if int(l.split(",")[2]) <= ckpt["round"]]
+        stats.write_text("".join(lines[:1] + kept))
+    print(f"[RESUME] {path.name}: continuing after round {ckpt['round']}", flush=True)
+    return ckpt
+
+
+def round_participants(active, args, round_idx):
+    """The clients that train this round: all of them, or a uniform sample of
+    --clients-per-round without replacement, deterministic in seed and round."""
+    k = args.clients_per_round
+    if k <= 0 or k >= len(active):
+        return active
+    chosen = sorted(random.Random(args.seed * 1_000_003 + round_idx).sample(active, k))
+    print(f"[ROUND {round_idx}] clients {chosen}", flush=True)
+    return chosen
+
+
 def run_corrected(
     method: str,
     initial_state: dict[str, torch.Tensor],
@@ -394,23 +437,20 @@ def run_corrected(
     global_c = {k: t.clone() for k, t in zero_params.items()}
     ema_state = base.clone_state_cpu(state) if args.ema_decay > 0 else None
 
-    if args.skip_round0_eval:
-        history = []
-    else:
+    ckpt_path = checkpoint_path(args, method, alpha)
+    ckpt = load_checkpoint(ckpt_path, args)
+    start, history = 1, []
+    if ckpt:
+        state, momentum, v_moments, last_grads, local_c, global_c, ema_state = (
+            ckpt[k] for k in ("state", "momentum", "v_moments", "last_grads",
+                              "local_c", "global_c", "ema_state"))
+        start, history = ckpt["round"] + 1, ckpt["history"]
+    elif not args.skip_round0_eval:
         history = eval_ext.evaluate_state(
-            state,
-            test_dataset,
-            test_records,
-            args,
-            repo_cfg,
-            fabric,
-            datamodule,
-            method,
-            alpha,
-            0,
-        )
+            state, test_dataset, test_records, args, repo_cfg, fabric, datamodule,
+            method, alpha, 0)
 
-    for round_idx in range(1, args.rounds + 1):
+    for round_idx in range(start, args.rounds + 1):
         if args.muon_lr_decay == "cosine":
             args.muon_lr_now = args.muon_lr * 0.5 * (
                 1.0 + math.cos(math.pi * (round_idx - 1) / max(args.rounds, 1))
@@ -422,7 +462,9 @@ def run_corrected(
         new_local_cs = {}
         round_t0 = time.time()
         client_sq_sum, client_norms = 0.0, []
-        for client_id in active_clients:
+        participants = round_participants(active_clients, args, round_idx)
+        round_samples = sum(len(clients[cid]) for cid in participants)
+        for client_id in participants:
             pseudo_grad, loss, new_m, new_v, new_lg, new_ci = train_client_corrected(
                 method,
                 state,
@@ -438,7 +480,7 @@ def run_corrected(
                 global_c,
             )
             weight = base.client_weight(
-                client_id, active_clients, clients, total_samples, args.aggregation
+                client_id, participants, clients, round_samples, args.aggregation
             )
             base.add_scaled_state(aggregate_update, pseudo_grad, weight)
             sq = state_sq_norm(pseudo_grad)
@@ -453,14 +495,14 @@ def run_corrected(
         state = base.state_plus_update(state, aggregate_update, scale=args.server_lr)
         if method == "fedlion":  # FedLion also averages the momentum buffers
             mean_m = {k: torch.zeros_like(t) for k, t in momentum[active_clients[0]].items()}
-            for cid in active_clients:
-                w = base.client_weight(cid, active_clients, clients, total_samples,
+            for cid in participants:
+                w = base.client_weight(cid, participants, clients, round_samples,
                                        args.aggregation)
                 for k in mean_m:
                     mean_m[k].add_(momentum[cid][k], alpha=w)
-            for cid in active_clients:
+            for cid in active_clients:       # the server momentum is what any client receives
                 momentum[cid] = {k: t.clone() for k, t in mean_m.items()}
-        for client_id in active_clients:
+        for client_id in participants:       # absent clients keep their last control variate
             local_c[client_id] = new_local_cs[client_id]
         weights = {
             cid: base.client_weight(
@@ -502,9 +544,13 @@ def run_corrected(
             )
             history.extend(rows)
             eval_ext.print_round(rows[0], args.rounds)
+        save_checkpoint(ckpt_path, round_idx, history, state=state, momentum=momentum,
+                        v_moments=v_moments, last_grads=last_grads, local_c=local_c,
+                        global_c=global_c, ema_state=ema_state)
     torch.save({"state": ema_state if ema_state is not None else state,
                 "method": method, "args": vars(args)},
                Path(args.output_dir) / f"model_{method}.pt")
+    ckpt_path.unlink(missing_ok=True)
     return history
 
 
@@ -529,6 +575,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--alphas", nargs="+", type=float, default=[0.1])
     parser.add_argument("--num-clients", type=int, default=6)
+    parser.add_argument("--clients-per-round", type=int, default=0,
+                        help="clients sampled per round without replacement; 0 = all")
     parser.add_argument(
         "--client-split-mode",
         default="single_class",
@@ -701,21 +749,27 @@ def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_record
     client update is untouched (AdamW); only the aggregation scale is exposed."""
     state = base.clone_state_cpu(initial_state)
     active = [cid for cid, idx in enumerate(clients) if idx]
-    total = sum(len(clients[cid]) for cid in active)
-    if args.skip_round0_eval:
-        history = []
-    else:
-        history = eval_ext.evaluate_state(state, test_dataset, test_records, args, repo_cfg,
-                                      fabric, datamodule, "fedavg", alpha, 0)
-    for round_idx in range(1, args.rounds + 1):
+    ckpt_path = checkpoint_path(args, "fedavg", alpha)
+    ckpt = load_checkpoint(ckpt_path, args)
+    start, history = 1, []
+    if ckpt:
+        state, start, history = ckpt["state"], ckpt["round"] + 1, ckpt["history"]
+    elif not args.skip_round0_eval:
+        history = eval_ext.evaluate_state(state, test_dataset, test_records, args,
+                                          repo_cfg, fabric, datamodule, "fedavg",
+                                          alpha, 0)
+    for round_idx in range(start, args.rounds + 1):
         aggregate_update = base.zero_state_like(state)
         losses = []
         round_t0 = time.time()
         client_sq_sum, client_norms = 0.0, []
-        for cid in active:
+        participants = round_participants(active, args, round_idx)
+        round_total = sum(len(clients[cid]) for cid in participants)
+        for cid in participants:
             grad, loss = train_client_fedavg(state, train_dataset, clients[cid], args,
                                              repo_cfg, fabric)
-            weight = base.client_weight(cid, active, clients, total, args.aggregation)
+            weight = base.client_weight(cid, participants, clients, round_total,
+                                        args.aggregation)
             base.add_scaled_state(aggregate_update, grad, weight)
             sq = state_sq_norm(grad)
             client_sq_sum += weight * sq
@@ -732,8 +786,10 @@ def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_record
                                        train_loss)
             history.extend(rows)
             eval_ext.print_round(rows[0], args.rounds)
+        save_checkpoint(ckpt_path, round_idx, history, state=state)
     torch.save({"state": state, "method": "fedavg", "args": vars(args)},
                Path(args.output_dir) / "model_fedavg.pt")
+    ckpt_path.unlink(missing_ok=True)
     return history
 
 
