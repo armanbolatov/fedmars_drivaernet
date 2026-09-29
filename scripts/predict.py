@@ -29,6 +29,7 @@ import torch
 import train as trainer          # sets up CFD_ROOT on sys.path as a side effect
 import ppbc_drivaernetpp_transformer as base
 import eval_ext
+import models
 
 
 def load_model(checkpoint, device="cuda"):
@@ -38,7 +39,7 @@ def load_model(checkpoint, device="cuda"):
         outputs = model(inputs)      # dict with 'pressure' and 'wss' predictions
     """
     ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model = base.make_model()
+    model = models.make_model(argparse.Namespace(**ck["args"]))
     model.load_state_dict(ck["state"])
     return model.to(device).eval(), ck
 

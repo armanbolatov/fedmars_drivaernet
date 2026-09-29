@@ -15,6 +15,7 @@ import ppbc_drivaernetpp_transformer as base
 from util.cfd_utils import calc_force_coeff_wrapper
 
 import forces
+import models
 
 COEFFS = ("c_d", "c_p", "c_wss", "c_l", "c_s")
 CASE_METRICS = ("mse_p", "mse_wss", "rae_c_p", "rae_c_wss", "rae_c_d",
@@ -34,7 +35,7 @@ def _rel_l1(pred, gt):
 def evaluate_state(state, dataset, records, args: argparse.Namespace, repo_cfg,
                    fabric, datamodule, method: str, alpha: float, round_idx: int,
                    train_loss: float | None = None):
-    model = base.make_model()
+    model = models.make_model(args)
     model.load_state_dict(state)
     model = fabric.setup_module(model)
     model.eval()
@@ -74,8 +75,6 @@ def evaluate_state(state, dataset, records, args: argparse.Namespace, repo_cfg,
             case_rows.extend(case_result_rows(file_paths, outputs, targets, metric_dict))
 
     del model
-    if fabric.device.type == "cuda":
-        torch.cuda.empty_cache()
 
     base_row = {
         "method": method,

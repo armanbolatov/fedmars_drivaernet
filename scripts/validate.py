@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Integrity check over every completed run. Prints one line per problem found.
 
-Checks eval cadence and round counts, NaNs in reported metrics, per-round stats
-consistency, side-force sanity (c_s ~ 0 by symmetry), and that every run's config
-matches its method yaml.
+Checks that every round the cadence requires was evaluated, NaNs in reported
+metrics, per-round stats consistency, side-force sanity (c_s ~ 0 by symmetry), and
+that every run's config matches its method yaml.
 
   python scripts/validate.py
 """
@@ -40,16 +40,19 @@ def check(run, problems):
     cfg = json.loads((run / "config.json").read_text())
     rounds, rows = eval_rounds(run)
     want_last, every = cfg.get("rounds"), cfg.get("eval_every", 1)
+    tail = cfg.get("eval_tail", 0)
 
     dupes = [r for r, n in Counter(rounds).items() if n > 1]
     if dupes:
         problems.append(f"{run}: duplicate eval rounds {sorted(dupes)[:5]}")
     if rounds and want_last and max(rounds) != want_last:
         problems.append(f"{run}: last eval round {max(rounds)}, config says {want_last}")
-    if want_last and every:
-        expect = want_last // every
-        if len(set(rounds)) != expect:
-            problems.append(f"{run}: {len(set(rounds))} eval rounds, expected {expect}")
+    if want_last:   # every round the cadence asks for must be there (a run resumed
+        need = {want_last}   # under a denser cadence may carry extra rounds: fine)
+        need |= {r for r in range(1, want_last + 1) if every and r % every == 0}
+        need |= set(range(want_last - tail + 1, want_last + 1))
+        if missing := sorted(need - set(rounds)):
+            problems.append(f"{run}: evaluations missing at rounds {missing[:5]}")
 
     for m in METRICS:
         vals = [r[m] for r in rows if r.get(m) not in (None, "")]
@@ -66,11 +69,10 @@ def check(run, problems):
         if srounds and want_last and max(srounds) != want_last:
             problems.append(f"{run}: round_stats stops at {max(srounds)} of {want_last}")
 
-    # side force ~0 by symmetry: judge c_s against the coefficient scale
-    # (~0.26 full, ~0.0121 proxy), never against c_d's much smaller error
+    # side force ~0 by symmetry, judged against the coefficient scale (~0.26 at full
+    # resolution, ~0.0121 at proxy); a diverged run never learned the field, so skip it
     scale = 0.259 if any(p.startswith("full") for p in run.parts) else 0.0121
     cd = [float(r["c_d_mae"]) for r in rows if r.get("c_d_mae") not in (None, "")]
-    # a diverged run never learned the field: symmetry says nothing about it
     if cd and cd[-1] > 0.25 * scale:
         return
     cs = [float(r["c_s_mae"]) for r in rows if r.get("c_s_mae") not in (None, "")]

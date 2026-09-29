@@ -8,7 +8,7 @@ worse on both sides; ladder ends are recorded, never silently accepted.
   python scripts/tune_full.py --methods fedmuon --epochs --gpu 0     # local epochs
   python scripts/tune_full.py --methods fedmuon --rebracket --gpu 0  # LR at E*
 
-A rung scores as mean c_d MAE over rounds 20-30 (NaN = diverged). Selections land
+A rung scores as mean c_d MAE over rounds 20, 25, 30 (NaN = diverged). Selections land
 in results/tune_*_<method>.json; recorded splits are skipped, so runs resume.
 """
 import argparse
@@ -22,9 +22,21 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNS = ROOT / "results" / "runs" / "full30"
 CFG = ROOT / "configs" / "method"
 PY = sys.executable
+MODEL = "transolver"   # --model; another model keeps its own runs and records
+
+
+def suffix():
+    return "" if MODEL == "transolver" else f"-{MODEL}"
+
+
+def runs_root():
+    return ROOT / "results" / "runs" / f"full30{suffix()}"
+
+
+def record_path(stem, method):
+    return ROOT / "results" / f"{stem}_{method}{suffix()}.json"
 
 LR_LADDER = [3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
 # largest local budget studied: an E=32 round takes ~2 wall-clock hours, outside the
@@ -40,6 +52,7 @@ LR_KEY = {"fedavg": "lr", "scaffold": "scaffold-lr", "centralized": "lr",
 SINGLE_LR = ("fedavg", "scaffold", "centralized")
 # hold all the data, so one walk on the reference split covers every distribution
 SPLIT_INDEPENDENT = ("centralized", "centralized_muon")
+SCORE_ROUNDS = (20, 25, 30)   # explicit, so a denser evaluation cadence scores the same
 DIVERGED = float("inf")
 
 
@@ -57,15 +70,15 @@ def tag_for(method, split, lr):
 
 
 def rundir(method, split, lr, epochs):
-    return RUNS / split / f"{tag_for(method, split, lr)}_E{epochs}_s42"
+    return runs_root() / split / f"{tag_for(method, split, lr)}_E{epochs}_s42"
 
 
 def score(run_dir):
-    """Mean c_d MAE over rounds 20-30. None if the run has not finished."""
+    """Mean c_d MAE over SCORE_ROUNDS. None if the run has not finished."""
     if not (run_dir / "summary.csv").exists():
         return None
     rows = [r for r in csv.DictReader((run_dir / "history.csv").open())
-            if r.get("body") == "all" and 20 <= int(r["round"]) <= 30]
+            if r.get("body") == "all" and int(r["round"]) in SCORE_ROUNDS]
     values = [float(r["c_d_mae"]) for r in rows]
     if not values or any(v != v for v in values):
         return DIVERGED
@@ -92,6 +105,8 @@ def run(method, split, lr, epochs, gpu, slots):
            "--seeds", "42", "--gpu", gpu, "--setting", "full30",
            "--local-epochs", str(epochs), "--min-free-gb", "35",
            "--slots", str(slots)]
+    if MODEL != "transolver":
+        cmd += ["--model", MODEL]
     for attempt in range(1, 101):
         print(f"    {tag_for(method, split, lr)} E{epochs} (attempt {attempt})",
               flush=True)
@@ -162,7 +177,7 @@ def record(out, row):
 
 
 def selected(stem, method, split, what):
-    out = ROOT / "results" / f"{stem}_{method}.json"
+    out = record_path(stem, method)
     if not out.exists():
         sys.exit(f"missing {out.name}: run the {what} ladder first")
     for row in json.loads(out.read_text()):
@@ -192,7 +207,10 @@ def main():
     ap.add_argument("--gpu", required=True)
     ap.add_argument("--slots", type=int, default=1,
                     help="how many of our runs may share one GPU (default 1)")
+    ap.add_argument("--model", default="transolver", help="configs/model/<name>.yaml")
     a = ap.parse_args()
+    global MODEL
+    MODEL = a.model
 
     for method in a.methods:
         if a.epochs:
@@ -204,7 +222,7 @@ def main():
             splits, stem, budget = [REFERENCE_SPLIT], "tune_full", 6
         else:
             splits, stem, budget = a.splits or SPLITS, "tune_full", 6
-        out = ROOT / "results" / f"{stem}_{method}.json"
+        out = record_path(stem, method)
         done = {r["split"] for r in
                 (json.loads(out.read_text()) if out.exists() else [])}
         for split in splits:

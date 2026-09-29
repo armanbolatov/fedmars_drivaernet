@@ -16,8 +16,8 @@ METRICS = ("c_d_mae", "c_l_mae", "c_s_mae", "c_d_r2", "c_l_r2",
            "rel_l2_p", "rel_l2_wss")
 STATS = ("drift_ratio",)   # training dynamics from round_stats.csv, not an eval metric
 COLUMNS = METRICS + STATS
-N_TAIL = 5  # per-round c_d is noisy: score a run by the mean of its last 5 evals,
-            # matching the tuning objective (never a single final round)
+N_TAIL = 5  # a run scores as the mean of its last 5 evaluations (rounds 96-100 in the
+            # benchmark), never a single round: per-round c_d is noisy
 
 
 def round_stats_means(rundir):
@@ -52,9 +52,11 @@ def run_rows(setting):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--setting", choices=["proxy", "full"], default=None)
+    ap.add_argument("--setting", default=None,
+                    help="proxy, full30, full, or a model namespace such as full-omniarch "
+                         "(default: the three Transolver settings)")
     a = ap.parse_args()
-    settings = [a.setting] if a.setting else ["proxy", "full"]
+    settings = [a.setting] if a.setting else ["proxy", "full30", "full"]
 
     for setting in settings:
         groups = defaultdict(list)  # (split, method-tag minus seed) -> [row dicts]

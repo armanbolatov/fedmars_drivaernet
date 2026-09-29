@@ -6,9 +6,10 @@
 Drawn for whatever exists, so this is safe to run mid-campaign:
   heterogeneity  error against client heterogeneity, at one local epoch
   participation_* error against rounds and against client uploads, per K
-  local_epochs   error against the local-epoch budget
+  local_epochs   error against local samples per round, per client distribution
   convergence    error against communication round (needs benchmark runs)
   ladders        every learning rate walked (appendix; selection is on c_d)
+  centralized    training curves of the two centralized references
 
 Style set once globally; colours are semantic and fixed per series (CUD palette).
 """
@@ -22,6 +23,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+
+from tune_full import SCORE_ROUNDS
 
 RC = {
     "axes.facecolor": "#EAEAF2", "figure.facecolor": "white",
@@ -65,6 +68,7 @@ SPLITS = [("single_class", "single-class"), ("dirichlet_0.5", r"$\alpha$=0.5"),
 SPLIT_COLORS = [matplotlib.cm.viridis(t) for t in np.linspace(0.05, 0.8, 4)]
 METRICS = [("c_d_mae", "drag MAE  $c_d$"), ("c_l_mae", "lift MAE  $c_l$")]
 EPOCHS = (1, 2, 4, 8, 16)
+SAMPLES_PER_EPOCH = 5703 / 6      # mean client size: 5703 training cars over 6 clients
 CEILINGS = ("centralized", "centralized_muon")   # hold all data: split-independent
 
 
@@ -111,11 +115,11 @@ def history_rows(run):
             if r.get("body") == "all"]
 
 
-def scores(run, lo=20, hi=30):
-    """Mean of each metric over the evaluations in rounds [lo, hi]."""
+def scores(run, rounds=SCORE_ROUNDS):
+    """Mean of each metric over the given evaluated rounds (default: the tuning score)."""
     if not (run / "summary.csv").exists():
         return {}
-    rows = [r for r in history_rows(run) if lo <= int(r["round"]) <= hi]
+    rows = [r for r in history_rows(run) if int(r["round"]) in rounds]
     out = {}
     for key, _ in METRICS:
         vals = [float(r[key]) for r in rows if r.get(key) not in (None, "", "nan")]
@@ -143,8 +147,8 @@ def legend_handle(m):
     return Line2D([], [], color=colour, marker=marker, ms=5, ls=ls, label=label)
 
 
-def two_panel(name, xlabel, series, xticks=None, log2_x=False,
-              flat_ceilings=False, sparse_markers=False):
+def two_panel(name, xlabel, series, xticks=None, flat_ceilings=False,
+              sparse_markers=False):
     """Drag left, lift right, one legend below; no titles (captions live in the
     paper). `series` = {method: [(x, {metric: value}), ...]}."""
     if not series:
@@ -172,9 +176,6 @@ def two_panel(name, xlabel, series, xticks=None, log2_x=False,
         log_y(ax)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        if log2_x:
-            ax.set_xscale("log", base=2)
-            ax.xaxis.set_minor_formatter(NullFormatter())
         if xticks:
             ax.set_xticks([t[0] for t in xticks])
             ax.set_xticklabels([t[1] for t in xticks])
@@ -199,7 +200,7 @@ def fig_heterogeneity():
         pts = []
         for i, (key, _) in enumerate(SPLITS):
             if complete:
-                s = scores(bench[m][key], lo=96, hi=100)
+                s = scores(bench[m][key], rounds=range(96, 101))
             else:
                 run = selected_run(sel, m, "single_class" if m in CEILINGS else key, 1)
                 s = scores(run) if run else {}
@@ -208,26 +209,64 @@ def fig_heterogeneity():
         if pts:
             series[m] = pts
     two_panel("heterogeneity",
-              "client distribution  (most heterogeneous on the left)", series,
+              "client distribution", series,
               xticks=list(enumerate(lbl for _, lbl in SPLITS)), flat_ceilings=True)
 
 
+def epochs_run(sel, m, split, e):
+    """The 30-round run for (method, split, E): the tuning ladder where it exists
+    (E = 1 everywhere, every E on single-class), else the `epochs` suite row."""
+    run = selected_run(sel, m, split, e)
+    return run if run and run.exists() else RUNS / "full30" / split / f"{m}_E{e}_s42"
+
+
 def fig_local_epochs():
+    """2x4: drag (top) and lift (bottom) against local work per round, one column
+    per client distribution. Every point is a 30-round run scored like a rung."""
     sel = selections("tune_full")
-    series = {}
-    for m in ORDER:
-        if m in CEILINGS:
-            continue
-        pts = []
-        for e in EPOCHS:
-            run = selected_run(sel, m, "single_class", e)
-            if run and (s := scores(run)):
-                pts.append((e, s))
-        if len(pts) >= 2:
-            series[m] = pts
-    two_panel("local_epochs",
-              "local epochs per round", series,
-              xticks=[(e, str(e)) for e in EPOCHS], log2_x=True)
+    fig, axes = plt.subplots(2, 4, figsize=(12.4, 5.6), sharex=True,
+                             constrained_layout=True)
+    fig.get_layout_engine().set(w_pad=0.05, h_pad=0.06, wspace=0.03, hspace=0.05)
+    rows, shown = [], set()
+    for j, (split, label) in enumerate(SPLITS):
+        axes[0, j].set_title(label, loc="left", fontsize=10)
+        drawn = False
+        for m in (m for m in ORDER if m not in CEILINGS):
+            pts = [(e, s) for e in EPOCHS if (s := scores(epochs_run(sel, m, split, e)))]
+            if len(pts) < 2:
+                continue
+            drawn = True
+            shown.add(m)
+            _, colour, marker, ls = SERIES[m]
+            for i, (key, _) in enumerate(METRICS):
+                xy = [(e, s[key]) for e, s in pts if key in s]
+                axes[i, j].plot([x for x, _ in xy], [y for _, y in xy], color=colour,
+                                ls=ls, marker=marker, ms=5, zorder=3)
+            rows += [[m, split, e] + [s.get(k, "") for k, _ in METRICS] for e, s in pts]
+        if not drawn:
+            for ax in axes[:, j]:
+                ax.text(0.5, 0.5, "pending", transform=ax.transAxes, ha="center",
+                        va="center", color="0.55")
+    if not shown:
+        plt.close(fig)
+        return
+    for (i, j), ax in np.ndenumerate(axes):
+        if ax.lines:
+            log_y(ax)
+        else:
+            ax.set_yticks([])
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(EPOCHS)
+        ax.set_xticklabels([f"{e * SAMPLES_PER_EPOCH / 1000:.1f}k" for e in EPOCHS])
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        if j == 0:
+            ax.set_ylabel(METRICS[i][1], fontsize=9)
+        if i == 1:
+            ax.set_xlabel("local samples per client per round", fontsize=9)
+    fig.legend(handles=[legend_handle(m) for m in ORDER if m in shown],
+               loc="outside lower center", ncols=6)
+    save(fig, "local_epochs", rows,
+         ["method", "split", "local_epochs"] + [k for k, _ in METRICS])
 
 
 def fig_convergence():
@@ -286,6 +325,13 @@ def fig_participation():
         fig.get_layout_engine().set(w_pad=0.05, h_pad=0.06, wspace=0.03, hspace=0.05)
         rows = []
         for i, (ax, m) in enumerate(zip(axes.flat, methods)):
+            ax.set_title(SERIES[m][0], loc="left", fontsize=10)
+            if not any(data[m].values()):     # nothing finished for this method yet
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.text(0.5, 0.5, "pending", transform=ax.transAxes, ha="center",
+                        va="center", color="0.55")
+                continue
             for k, colour in zip(ks, colours):
                 pts = data[m][k]
                 if not pts:
@@ -309,7 +355,6 @@ def fig_participation():
             log_y(ax)
             if name == "participation_comm":
                 ax.set_xscale("log")
-            ax.set_title(SERIES[m][0], loc="left", fontsize=10)
             if i % 3 == 0:
                 ax.set_ylabel(METRICS[0][1], fontsize=9)
             if i >= 3:
@@ -321,6 +366,38 @@ def fig_participation():
                            label=SERIES[c][0]) for c in CEILINGS if ceilings[c]]
         fig.legend(handles=handles, loc="outside lower center", ncols=len(handles))
         save(fig, name, rows, ["method", "clients_per_round", "round", "x", "c_d_mae"])
+
+
+def fig_centralized():
+    """Training curves of the two centralized references at their selected rates on
+    the 30-round setting: train loss every round, drag and lift at the evaluated
+    rounds."""
+    sel = selections("tune_full")
+    colours = {"centralized_muon": SERIES["fedmuon"][1], "centralized": SERIES["fedavg"][1]}
+    runs = [(m, run) for m in CEILINGS
+            if (run := selected_run(sel, m, "single_class", 1)) and (run / "summary.csv").exists()]
+    if not runs:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(12.4, 3.4), constrained_layout=True)
+    fig.get_layout_engine().set(w_pad=0.06, wspace=0.04)
+    rows, handles = [], []
+    for m, run in runs:
+        style = dict(color=colours[m], zorder=3)
+        stats = list(csv.DictReader((run / "round_stats.csv").open()))
+        axes[0].plot([int(r["round"]) for r in stats],
+                     [float(r["train_loss"]) for r in stats], **style)
+        for ax, key in zip(axes[1:], ("c_d_mae", "c_l_mae")):
+            pts = curve(run, key)
+            ax.plot([r for r, _ in pts], [v for _, v in pts], marker="o", ms=4, **style)
+        rows += [[m, int(r["round"]), r["train_loss"]] for r in stats]
+        handles.append(Line2D([], [], label=SERIES[m][0], **style))
+    for ax, ylabel in zip(axes, ["train loss", "test " + METRICS[0][1],
+                                 "test " + METRICS[1][1]]):
+        log_y(ax)
+        ax.set_xlabel("round")
+        ax.set_ylabel(ylabel)
+    fig.legend(handles=handles, loc="outside lower center", ncols=len(handles))
+    save(fig, "centralized", rows, ["method", "round", "train_loss"])
 
 
 def fig_ladders():
@@ -338,7 +415,7 @@ def fig_ladders():
                   for s in rec["evaluated"].values() if s != "diverged"]
         # a rung four times worse than the panel's best says only "it failed"
         cap = min(finite) * 4
-        for i, (key, _) in enumerate(SPLITS):
+        for j, (key, _) in enumerate(SPLITS):
             rec = sel[m].get(key)
             if not rec:
                 continue
@@ -350,16 +427,16 @@ def fig_ladders():
                     xs.append(float(lr))
                     ys.append(float(s))
                 rows.append([m, key, lr, s])
-            ax.plot(xs, ys, color=SPLIT_COLORS[i], marker="o", ms=4, zorder=3)
+            ax.plot(xs, ys, color=SPLIT_COLORS[j], marker="o", ms=4, zorder=3)
             ax.plot(div, [cap] * len(div), ls="none", marker="^", ms=6,
-                    mfc="white", mec=SPLIT_COLORS[i], mew=1.2, zorder=3)
+                    mfc="white", mec=SPLIT_COLORS[j], mew=1.2, zorder=3)
             if rec["evaluated"].get(rec["best"]) not in (None, "diverged"):
                 ax.plot([float(rec["best"])], [float(rec["evaluated"][rec["best"]])],
                         ls="none", marker="o", ms=11, mfc="none", mec="#2A2A2A",
                         mew=1.3, zorder=4)
         ax.set_xscale("log")
         log_y(ax)
-        ax.set_ylim(top=cap * 1.3)
+        ax.set_ylim(min(finite) / 1.15, cap * 1.3)   # room for the "selected" ring
         ax.set_title(SERIES[m][0], loc="left", fontsize=10)
         if i % 4 == 0:                    # y-label once per row, not eight times
             ax.set_ylabel(METRICS[0][1], fontsize=9)
@@ -380,5 +457,5 @@ def fig_ladders():
 if __name__ == "__main__":
     print("figures ->", OUT)
     for fn in (fig_heterogeneity, fig_local_epochs, fig_convergence, fig_ladders,
-               fig_participation):
+               fig_participation, fig_centralized):
         fn()

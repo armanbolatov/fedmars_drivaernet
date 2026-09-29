@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-"""Optuna tuning entry point. Protocol: docs/tuning.md.
+"""Stage 1: TPE search at reduced fidelity (6k points, 20 rounds), the same budget of
+distinct configurations for every method.
 
-Idempotent: --n-trials is the study's TOTAL budget; completed work is counted and
-only the remainder runs, so re-running any stage or launcher is safe.
+Idempotent: --n-trials is the study's total budget; completed work is counted and
+only the remainder runs, so re-running any stage is safe.
 
   python scripts/tune.py --stage fedmuon --n-trials 24
   python scripts/tune.py --stage gamma --n-trials 5            # uses fedmuon's best
@@ -21,7 +22,7 @@ import time
 from pathlib import Path
 
 import optuna
-from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
+from optuna.pruners import MedianPruner, NopPruner
 from optuna.samplers import GridSampler, TPESampler
 from optuna.storages import RDBStorage
 
@@ -46,6 +47,12 @@ GAMMA = [0.01, 0.025, 0.04, 0.1, 1.0]
 
 ALPHA = None         # --alpha: Dirichlet concentration; None = natural single_class split
 PROBE = False        # --probe-edges: bracket a study's edge params one rung outward
+MODEL = "transolver"  # --model: another model gets its own studies, logs and exports
+
+
+def label(stage):
+    """Study-name stem: the stage, plus the model when it is not the default."""
+    return stage if MODEL == "transolver" else f"{stage}-{MODEL}"
 
 # one rung beyond every base ladder, for edge probes
 WIDE = {
@@ -77,10 +84,8 @@ PROXY = ["--downsample-size", "6000", "--rounds", "20", "--eval-every", "1",
          "--num-workers", "8", "--local-epochs", "1", "--batch-size", "32",
          "--seed", "42", "--server-lr", "1.0", "--skip-round0-eval"]
 MUON_FIXED = ["--cv-rule", "mean", "--muon-scale", "shape", "--muon-scale-const", "0.2",
-              "--muon-exclude", "preprocess.linear_pre,mlp_out.2",
               "--muon-lr-decay", "cosine", "--muon-wd", "0.1", "--grad-clip", "1.0"]
-ADAMW = ["--grad-clip", "1.0", "--weight-decay", "0.01",
-         "--muon-exclude", "preprocess.linear_pre,mlp_out.2"]
+ADAMW = ["--grad-clip", "1.0", "--weight-decay", "0.01"]
 ONE_CLIENT = ["--num-clients", "1", "--client-split-mode", "dirichlet",
               "--alphas", "1000000"]
 
@@ -92,7 +97,7 @@ def suggest(trial, stage):
 
 def probe_configs(stage, tag):
     """One config per edge warning: the study's best with that param one rung outward."""
-    best = load_best(f"{stage}_{tag}" if tag != "b32" else stage)
+    best = load_best(f"{label(stage)}_{tag}" if tag != "b32" else label(stage))
     base = {k: best[k] for k in SPACES[stage]}
     out = []
     for warn in best.get("edge_warnings", []):
@@ -116,7 +121,7 @@ def load_best(stage):
 
 
 def reference_params(stage):
-    return {k: v for k, v in load_best(stage).items() if k in SPACES[stage]}
+    return {k: v for k, v in load_best(label(stage)).items() if k in SPACES[stage]}
 
 
 # per-alpha studies start from the method's own single_class optimum
@@ -137,6 +142,8 @@ def build_cmd(stage, p, outdir, rounds=0):
     cmd = [PY, SCRIPT, "--output-dir", str(outdir)] + proxy
     if ALPHA is not None:
         cmd += ["--client-split-mode", "dirichlet", "--alphas", repr(ALPHA)]
+    if MODEL != "transolver":
+        cmd += ["--model", MODEL]
     key = {"smoke": "fedmuon"}.get(stage, stage)
     if key == "scaffold":  # single lr: same value for both param groups
         cmd += ["--methods", "scaffold_adam", "--grad-clip", "1.0",
@@ -164,7 +171,7 @@ def build_cmd(stage, p, outdir, rounds=0):
             "--muon-lr", repr(p["muon_lr"]), "--scalar-lr", repr(p["scalar_lr"]),
             "--fed-beta", repr(p["fed_beta"])]
     else:  # fedmuon and the gamma ablation share the Muon recipe
-        base_stage = "fedmars" if key == "gamma" else "fedmuon"
+        base_stage = label("fedmars" if key == "gamma" else "fedmuon")
         ref = base_stage if ALPHA is None else f"{base_stage}_dir{ALPHA:g}"
         base = load_best(ref) if key == "gamma" else p
         cmd += ["--methods", "fedmuon"] + MUON_FIXED + [
@@ -221,7 +228,7 @@ def objective(trial, stage, rounds=0):
                 and prev.params == trial.params):
             trial.set_user_attr("duplicate_of", prev.number)
             return prev.value
-    run_tag = stage if ALPHA is None else f"{stage}_dir{ALPHA:g}"
+    run_tag = label(stage) if ALPHA is None else f"{label(stage)}_dir{ALPHA:g}"
     outdir = ROOT / "log" / "optuna" / run_tag / f"t{trial.number:03d}"
     shutil.rmtree(outdir, ignore_errors=True)  # run.log appends; start clean
     outdir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +275,7 @@ def objective(trial, stage, rounds=0):
 
 
 def edge_check(study):
-    stage = study.study_name.rsplit("_", 1)[0]
+    stage = study.study_name.rsplit("_", 1)[0].split("-")[0]   # drop any model suffix
     ladders = SPACES.get(stage, {})
     warns = [f"EDGE HIT: {k}={v} is a ladder endpoint - extend {k} and rerun"
              for k, v in study.best_params.items()
@@ -303,9 +310,10 @@ def export(study, stage):
 
 
 def main():
-    global ALPHA, PROBE
+    global ALPHA, PROBE, MODEL
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True, choices=sorted(SPACES))
+    ap.add_argument("--model", default="transolver", help="configs/model/<name>.yaml")
     ap.add_argument("--n-trials", type=int, default=24,
                     help="distinct configurations to train (same for every method)")
     ap.add_argument("--rounds", type=int, default=0, help="override rounds (smoke)")
@@ -316,6 +324,7 @@ def main():
     args = ap.parse_args()
     ALPHA = args.alpha
     PROBE = args.probe_edges
+    MODEL = args.model
     if args.stage.startswith("centralized") and ALPHA is not None:
         sys.exit("centralized holds all data - split-independent, tune once without --alpha")
     OPTDIR.mkdir(parents=True, exist_ok=True)
@@ -332,7 +341,7 @@ def main():
         pruner = NopPruner()
 
     tag = "b32" if ALPHA is None else f"dir{ALPHA:g}"
-    name = f"{args.stage}_probe_{tag}" if PROBE else f"{args.stage}_{tag}"
+    name = f"{label(args.stage)}_probe_{tag}" if PROBE else f"{label(args.stage)}_{tag}"
     if PROBE:
         pruner = NopPruner()  # probes must run to completion
     study = optuna.create_study(

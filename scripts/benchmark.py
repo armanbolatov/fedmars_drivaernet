@@ -1,13 +1,16 @@
 #!/usr/bin/env python
-"""Benchmark runner: methods x splits x seeds x local-epochs, driven by configs/.
+"""Benchmark runner: one process per GPU over rows = methods x splits x seeds x epochs.
 
-One process per GPU; runs its work list sequentially and skips anything already done
-(summary.csv present), so it is safely resumable and two instances can split the work:
+  python scripts/benchmark.py --suite headline --gpu 0
+  python scripts/benchmark.py --suite splits --gpu 0
+  python scripts/benchmark.py --suite participation --gpu 0
+  python scripts/benchmark.py --suite epochs --setting full30 --gpu 0
+  python scripts/benchmark.py --methods fedmuon --splits dirichlet_10 --local-epochs 4 --gpu 0
 
-  python scripts/benchmark.py --suite headline --gpu 1
-  python scripts/benchmark.py --suite splits --gpu 2
-  python scripts/benchmark.py --suite gamma --gpu 2
-  python scripts/benchmark.py --methods fedmuon scaffold --splits single_class --seeds 42 --gpu 0
+Finished rows (summary.csv) are skipped, a row another runner is writing is skipped,
+and a row with a checkpoint resumes, so runners on several cards can share one work
+list. Card slots are file locks under log/gpu_slots (--slots caps our runs per card).
+scripts/run_bench.sh wraps this in a retry loop for a shared machine.
 """
 import argparse
 import fcntl
@@ -60,7 +63,7 @@ def acquire_slot(gpu, slots, need_mib, poll=120):
         time.sleep(poll)
 
 
-def tuned_lr(method, split, local_epochs):
+def tuned_lr(method, split, local_epochs, suffix=""):
     """Selected LR: the re-bracket at tuned E if present, else the per-split ladder."""
     from tune_full import LR_KEY, REFERENCE_SPLIT, SPLIT_INDEPENDENT
     if method not in LR_KEY:
@@ -69,7 +72,7 @@ def tuned_lr(method, split, local_epochs):
         split = REFERENCE_SPLIT
     stems = ["tune_full"] if local_epochs == 1 else ["tune_rebracket", "tune_full"]
     for stem in stems:
-        path = ROOT / "results" / f"{stem}_{method}.json"
+        path = ROOT / "results" / f"{stem}_{method}{suffix}.json"
         if not path.exists():
             continue
         for row in json.loads(path.read_text()):
@@ -79,7 +82,7 @@ def tuned_lr(method, split, local_epochs):
 
 
 def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, outdir,
-              method=None, clients_per_round=None):
+              method=None, clients_per_round=None, model=None):
     args = {}
     args.update({k.replace("_", "-"): v for k, v in base["protocol"].items()})
     args.update({k.replace("_", "-"): v for k, v in base[setting].items()})
@@ -89,11 +92,14 @@ def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, o
     # per-split overrides from the method yaml
     args.update(method_cfg.get("per_split", {}).get(split_cfg["split"], {}))
     # the tuning of record lives in results/tune_*.json, not in the method yaml
-    if method and (sel := tuned_lr(method, split_cfg["split"], local_epochs)):
+    suffix = f"-{model}" if model else ""
+    if method and (sel := tuned_lr(method, split_cfg["split"], local_epochs, suffix)):
         key, lr = sel
         args[key] = lr
         if method in SINGLE_LR:
             args["scalar-lr"] = lr
+    if model:
+        args["model"] = model
     args["seed"] = seed
     args["local-epochs"] = local_epochs
     if gamma is not None:
@@ -112,12 +118,16 @@ def build_cmd(base, method_cfg, split_cfg, setting, seed, local_epochs, gamma, o
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--suite", choices=["headline", "splits", "gamma", "participation"])
+    ap.add_argument("--suite",
+                    choices=["headline", "splits", "gamma", "participation", "epochs"])
     ap.add_argument("--setting", choices=["proxy", "full", "full30"], default="full")
+    ap.add_argument("--model", default="transolver",
+                    help="configs/model/<name>.yaml; another model keeps its runs and "
+                         "tuning records in their own namespace")
     ap.add_argument("--methods", nargs="+")
     ap.add_argument("--splits", nargs="+", default=["single_class"])
     ap.add_argument("--seeds", nargs="+", type=int)
-    ap.add_argument("--local-epochs", nargs="+", type=int, default=[1])
+    ap.add_argument("--local-epochs", nargs="+", type=int)
     ap.add_argument("--gpu", required=True)
     ap.add_argument("--min-free-gb", type=int,
                     help="wait for this much free GPU memory before each run "
@@ -129,12 +139,14 @@ def main():
 
     base = load(CFG / "base.yaml")
     seeds = a.seeds or base["benchmark"]["seeds"]
-    methods, splits, epochs = a.methods, a.splits, a.local_epochs
+    methods, splits, epochs = a.methods, a.splits, a.local_epochs or [1]
     gammas, samplings = [None], [None]
+    model = None if a.model == "transolver" else a.model   # default: nothing changes
+    suffix = f"-{model}" if model else ""
 
     federated = ["fedavg", "scaffold", "fedlion", "fedmuon", "fedmars", "fedolion"]
     if a.suite == "headline":       # main table: natural split, each method at its
-        methods = federated + ["centralized", "centralized_muon"]   # tuned local epochs
+        methods = methods or federated + ["centralized", "centralized_muon"]  # tuned E
     elif a.suite == "splits":       # heterogeneity sweep at matched local compute (E=1)
         methods = methods or federated
         splits = ["single_class", "dirichlet_0.5", "dirichlet_10", "dirichlet_1000"]
@@ -145,12 +157,16 @@ def main():
     elif a.suite == "participation":  # clients sampled per round, each method at its
         methods = methods or federated  # tuned local epochs; K=6 is the headline row
         samplings = base["benchmark"]["clients_per_round"]
+    elif a.suite == "epochs":       # local-epoch ladder on the Dirichlet splits (E=1 is
+        methods = methods or federated  # the stage-2 winner, single-class is stage 3)
+        splits = ["dirichlet_0.5", "dirichlet_10", "dirichlet_1000"]
+        epochs = a.local_epochs or [4, 16]
     if not methods:
         sys.exit("give --suite or --methods")
 
     def tuned_epochs(m):
         """The local-epoch count selected by the ladder on the reference split."""
-        path = ROOT / "results" / f"tune_epochs_{m}.json"
+        path = ROOT / "results" / f"tune_epochs_{m}{suffix}.json"
         if not path.exists():
             sys.exit(f"missing {path.name}: run tune_full.py --epochs first")
         return int(json.loads(path.read_text())[0]["best"])
@@ -162,12 +178,12 @@ def main():
             e = 1 if m.startswith("centralized") else tuned_epochs(m)
         tag = (f"{m}_E{e}" + (f"_K{k}" if k is not None else "") + f"_s{s}"
                + (f"_g{g:g}" if g is not None else ""))
-        outdir = ROOT / "results" / "runs" / a.setting / sp / tag
+        outdir = ROOT / "results" / "runs" / f"{a.setting}{suffix}" / sp / tag
         if (outdir / "summary.csv").exists():
             skipped += 1
             continue
         todo.append((m, sp, e, s, g, k, outdir))
-
+    todo.sort(key=lambda t: -t[2] * (t[5] or 6))   # longest rows first
     # a run peaks at ~31 GiB; per-card concurrency is set by --slots
     need_mib = (a.min_free_gb or {"full": 35, "full30": 35}.get(a.setting, 18)) * 1024
     failed = []
@@ -175,7 +191,7 @@ def main():
     for i, (m, sp, e, s, g, k, outdir) in enumerate(todo, 1):
         cmd = build_cmd(base, load(CFG / "method" / f"{m}.yaml"),
                         load(CFG / "split" / f"{sp}.yaml"), a.setting, s, e, g, outdir,
-                        method=m, clients_per_round=k)
+                        method=m, clients_per_round=k, model=model)
         print(f"[{i}/{len(todo)}] {outdir.relative_to(ROOT)}", flush=True)
         if a.dry_run:
             print("   ", " ".join(cmd), flush=True)
@@ -183,23 +199,30 @@ def main():
         outdir.mkdir(parents=True, exist_ok=True)
         newest = max((f.stat().st_mtime for f in outdir.iterdir() if f.name != ".lock"),
                      default=0)
-        if time.time() - newest < 1800:
-            print("    in progress (fresh output), skipping", flush=True)
+        if time.time() - newest < 7200:        # longer than any round: a run whose
+            print("    in progress (fresh output), skipping", flush=True)  # runner died
             failed.append(str(outdir.relative_to(ROOT)))
             continue
+        # card first, then row: a runner waiting on a busy card must not hold a row
+        slot = acquire_slot(a.gpu, a.slots, need_mib)
         claim = (outdir / ".lock").open("w")   # one writer per row, across runners
         try:
             fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print("    in progress elsewhere, skipping", flush=True)
             claim.close()
+            slot.close()
             failed.append(str(outdir.relative_to(ROOT)))
             continue
-        slot = acquire_slot(a.gpu, a.slots, need_mib)
+        if (outdir / "summary.csv").exists():  # finished by another runner meanwhile
+            claim.close()
+            slot.close()
+            continue
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=a.gpu,
                    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
-        try:
+        try:   # the run inherits both locks, so they outlive a killed runner
             r = subprocess.run(cmd, cwd=str(ROOT), env=env,
+                               pass_fds=(slot.fileno(), claim.fileno()),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:
             slot.close()               # releases the card slot

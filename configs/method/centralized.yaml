@@ -16,6 +16,5 @@ args:
   scalar-lr: 3.0e-5
   weight-decay: 0.01
   fed-beta: 0.6         # tuned; flat within 0.3% of 0.7, boundary of the probed range
-  muon-exclude: preprocess.linear_pre,mlp_out.2
 
 # no per_split: centralized always holds all data, one config for every split

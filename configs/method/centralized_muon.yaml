@@ -14,7 +14,6 @@ args:
   cv-rule: mean
   muon-scale: shape
   muon-scale-const: 0.2
-  muon-exclude: preprocess.linear_pre,mlp_out.2
   muon-lr-decay: cosine
   muon-wd: 0.1
 

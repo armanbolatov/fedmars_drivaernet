@@ -1,28 +1,22 @@
-"""Federated SCAFFOLD / FedMuon on DrivAerNet++ with the repository Transformer.
+"""Federated training on DrivAerNet++ with the cfd_transformer model.
 
-Reuses the data pipeline, client partitioning, and evaluation of
-``ppbc_drivaernetpp_transformer.py`` from the cfd_transformer repo (imported as a
-library, nothing there is modified). Adds two methods on top of its FedAvg:
+The data pipeline, client partitioning, model and metrics come from
+``ppbc_drivaernetpp_transformer.py`` in the cfd_transformer repo (imported, never
+modified; set ``CFD_ROOT`` if it is not in ``~``). One trainer covers every method:
 
-- ``scaffold``: momentum-SGD local steps corrected by control variates,
-  following the FedMuon paper's SCAFFOLD baseline: the local update is
-  ``p -= lr * (m_i - c_i + c)`` and after each round ``c_i <- mean of m_i over
-  the round's steps``, ``c <- weighted mean of c_i``.
-- ``scaffold_adam``: same control variates, but the corrected momentum is
-  normalized Adam-style: ``v <- beta2*v + (1-beta2)*(m_i - c_i + c)^2`` and
-  ``p -= lr * (m_i - c_i + c) / (sqrt(v) + eps)``. This mirrors the intended
-  semantics of the supplementary ``scaffold_adam_optimizer.py`` (whose ``v``
-  buffer accidentally never persists) and is the fair baseline against the
-  AdamW-based FedAvg.
-- ``fedmuon``: bias-corrected LMO updates (FedMuon, arXiv:2509.26337). Matrix
-  parameters take ``p -= muon_lr * NS(m_i - c_i + c) * sqrt(max(dims))`` with
-  Newton-Schulz orthogonalization; non-matrix parameters (biases, norms) take
-  the scaffold_adam-style Adam update with ``scalar_lr``. After each round
-  ``c_i <- m_i``, ``c <- weighted mean of c_i``. Momentum ``m_i`` and second
-  moments ``v_i`` persist across rounds per client.
+- ``fedavg``        AdamW clients, weight averaging.
+- ``scaffold_adam`` control variates (SCAFFOLD) on the momentum, Adam-normalised step.
+- ``fedmuon``       Newton-Schulz orthogonalised corrected momentum on matrix params
+                    (FedMuon); ``--mars-gamma > 0`` adds the MARS correction (FedMARS-M).
+- ``fedolion``      FedMuon with the orthogonalised direction passed through a sign.
+- ``fedlion``       Lion clients; the server averages weights and momentum.
+- ``scaffold``      plain SGD with control variates (equivalence tests only).
 
-Both methods use full client participation each round, matching the existing
-FedAvg loop. Set ``CFD_ROOT`` env var if cfd_transformer is not in ``~``.
+Per round: sample clients (``--clients-per-round``, default all), train each from the
+global state, aggregate, evaluate on the cadence (``--eval-every``, ``--eval-tail``),
+checkpoint. A run restarted into the same directory resumes from its checkpoint and
+reproduces the uninterrupted run; skipped evaluations reproduce the RNG draws an
+evaluation makes, so the cadence never changes the trajectory.
 """
 
 import argparse
@@ -48,29 +42,25 @@ from torch.utils.data import DataLoader, Subset
 import ppbc_drivaernetpp_transformer as base
 
 import eval_ext
+import models
 
 
-# ---------------------------------------------------------------------------
-# Muon helpers (ported from the FedMuon supplementary code, with the shadowed
-# double parameter loop of the original optimizer classes removed).
-# ---------------------------------------------------------------------------
+# --- Muon update -------------------------------------------------------------
 
 MUON_EXCLUDE_KEYWORDS = ("embed",)
-MUON_EXTRA_EXCLUDES: list[str] = []
+MUON_EXTRA_EXCLUDES: list[str] = []      # filled from --muon-exclude
 ADAM_EPS = 1e-8
 
 
 def is_muon_param(name: str, param: torch.Tensor) -> bool:
+    """Matrix parameters get the Muon update; excluded names and vectors get Adam."""
     keywords = MUON_EXCLUDE_KEYWORDS + tuple(MUON_EXTRA_EXCLUDES)
     return param.ndim >= 2 and not any(k in name for k in keywords)
 
 
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
-    """Newton-Schulz iteration approximating the orthogonalization of G.
-
-    With steps=0 this returns G normalized by its Frobenius norm, matching the
-    T=0 case of the paper's inexact LMO.
-    """
+    """Newton-Schulz approximation of the orthogonalisation of G (steps=0: G divided
+    by its Frobenius norm)."""
     assert G.ndim == 2
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.float()
@@ -93,25 +83,13 @@ def muon_update(
     scale_mode: str = "shape",
     scale_const: float = 1.0,
 ) -> torch.Tensor:
-    """Spectral update of the corrected momentum.
-
-    scale_mode:
-      - "shape" (default, standard Muon/FedMuon): sqrt(max(d1,d2)) * NS(M). The
-        orthogonalized direction has ~unit singular values, so the per-weight RMS
-        step is ~constant regardless of gradient magnitude — a pure LMO that does
-        not shrink near a stationary point (hence the eval oscillation).
-      - "rms" (improved spectral-scaffold): additionally multiply by rms(M), the
-        root-mean-square of the corrected momentum. This keeps the spectral
-        *conditioning* (well-scaled direction across singular subspaces) but makes
-        the step *magnitude* track the gradient, so it shrinks toward convergence
-        like a proper preconditioned descent step. Converges with constant LR.
-    """
+    """scale_const * sqrt(max(d1, d2)) * NS(M): the standard Muon step ("shape"; 0.2
+    matches AdamW's update RMS as in Moonlight, 1.0 is the original scale). "rms"
+    additionally multiplies by rms(M) so the step shrinks as the momentum does."""
     M = corrected_momentum
     if M.ndim > 2:  # conv-style filters: flatten trailing dims
         M = M.view(len(M), -1)
     update = zeropower_via_newtonschulz5(M, steps=ns_steps)
-    # scale_const=0.2 gives the Moonlight RMS-match (update RMS ~0.2, like AdamW);
-    # scale_const=1.0 is the original FedMuon/Keller-Jordan scale (RMS ~1).
     update = update * (scale_const * max(update.size(-2), update.size(-1)) ** 0.5)
     if scale_mode == "rms":
         rms = M.norm() / (M.numel() ** 0.5 + 1e-12)
@@ -119,9 +97,7 @@ def muon_update(
     return update
 
 
-# ---------------------------------------------------------------------------
-# Local training with control-variate correction (shared by both methods).
-# ---------------------------------------------------------------------------
+# --- Local training ------------------------------------------------------------
 
 
 def train_client_corrected(
@@ -138,19 +114,18 @@ def train_client_corrected(
     local_c_cpu: dict[str, torch.Tensor],
     global_c_cpu: dict[str, torch.Tensor],
 ):
-    """One client's local pass. Returns (pseudo_grad, loss, momentum, v, last_grad, new c_i)."""
-    model = base.make_model()
+    """One client's local pass for every method except fedavg.
+
+    Returns (pseudo_grad, mean loss, momentum, v, last_grad, new control variate),
+    all on the CPU."""
+    model = models.make_model(args)
     model.load_state_dict(base_state)
-    # Capture parameter names before Fabric wraps the module (the wrapper
-    # prefixes names with "_forward_module."); setup_module moves these same
-    # Parameter objects to the device in place.
-    params = dict(model.named_parameters())
+    params = dict(model.named_parameters())   # names before Fabric prefixes them
     model = fabric.setup_module(model)
 
-    micro = max(args.micro_batches, 1)
-    loader = DataLoader(
+    micro = max(args.micro_batches, 1)        # gradient accumulation: same batch,
+    loader = DataLoader(                      # peak memory divided by `micro`
         Subset(dataset, indices),
-        # grad accumulation: same effective batch, peak memory / micro
         batch_size=args.batch_size // micro,
         shuffle=True,
         num_workers=args.num_workers,
@@ -189,7 +164,7 @@ def train_client_corrected(
                     p.grad = None
             outputs = model(inputs)
             loss, _ = loss_wrapper(inputs, outputs, targets, others)
-            total_loss += float(loss.detach().cpu())
+            total_loss = total_loss + loss.detach().double()   # no per-step GPU sync
             total_batches += 1
             fabric.backward(loss / micro if micro > 1 else loss)
             if (batch_idx + 1) % micro != 0:
@@ -203,15 +178,13 @@ def train_client_corrected(
                     grad = p.grad
                     if grad is None:
                         continue
-                    if method == "fedlion":
-                        # Lion: sign of the interpolated momentum; server averages
-                        # weights AND momentum (FedLion), no control variates
-                        m = momentum[name]
+                    if method == "fedlion":   # sign of the interpolated momentum,
+                        m = momentum[name]    # no control variates
                         upd = torch.sign(beta * m + (1.0 - beta) * grad)
                         m.mul_(args.lion_beta2).add_(grad, alpha=1.0 - args.lion_beta2)
                         if args.weight_decay > 0:
-                            p.mul_(1.0 - args.lion_lr * args.weight_decay)
-                        p.add_(upd, alpha=-args.lion_lr)
+                            p.mul_(1.0 - args.lion_lr_now * args.weight_decay)
+                        p.add_(upd, alpha=-args.lion_lr_now)
                         continue
                     use_muon = (
                         method in ("fedmuon", "fedolion")
@@ -232,14 +205,10 @@ def train_client_corrected(
                     m.mul_(beta).add_(g_in, alpha=1.0 - beta)
                     corrected = m - local_c[name] + global_c[name]
                     if use_muon:
-                        if args.muon_mode == "identity":
-                            # LMO removed: raw corrected-momentum step
-                            # (SGD-scaffold semantics for equivalence tests)
+                        if args.muon_mode == "identity":   # raw corrected momentum
                             p.add_(corrected, alpha=-args.muon_lr_now)
                         else:
-                            # decoupled (AdamW-style) weight decay, Moonlight-style:
-                            # uses the base scheduled lr, anchors weight norm.
-                            if args.muon_wd > 0:
+                            if args.muon_wd > 0:           # decoupled weight decay
                                 p.mul_(1.0 - args.muon_lr_now * args.muon_wd)
                             update = muon_update(
                                 corrected,
@@ -247,24 +216,21 @@ def train_client_corrected(
                                 args.muon_scale,
                                 args.muon_scale_const,
                             )
-                            if method == "fedolion":
-                                # OLion: entrywise sign of the orthogonalized
-                                # direction (spectral AND l_inf constraint)
+                            if method == "fedolion":       # sign of the direction
                                 update = torch.sign(update) * args.muon_scale_const
                             p.add_(update.reshape(p.shape), alpha=-args.muon_lr_now)
                     elif method == "scaffold":
-                        p.add_(corrected, alpha=-args.scaffold_lr)
-                    else:
-                        # Adam-style normalization of the corrected momentum
-                        # (scaffold_adam for all params; fedmuon for non-matrix)
-                        vb = v_buf[name]
+                        p.add_(corrected, alpha=-args.scaffold_lr_now)
+                    else:   # Adam-normalised corrected momentum (scaffold_adam;
+                        vb = v_buf[name]                   # non-matrix params of Muon)
                         vb.mul_(args.fed_beta2).addcmul_(
                             corrected, corrected, value=1.0 - args.fed_beta2
                         )
                         if method in ("fedmuon", "fedolion"):
-                            lr = args.scalar_lr
+                            lr = args.scalar_lr_now
                         else:  # scaffold_adam: matrix params use scaffold_lr, rest scalar_lr
-                            lr = args.scaffold_lr if is_muon_param(name, p) else args.scalar_lr
+                            lr = (args.scaffold_lr_now if is_muon_param(name, p)
+                                  else args.scalar_lr_now)
                         if args.adam_wd > 0:
                             p.mul_(1.0 - lr * args.adam_wd)
                         p.addcdiv_(corrected, vb.sqrt().add_(ADAM_EPS), value=-lr)
@@ -272,11 +238,11 @@ def train_client_corrected(
                         grad_accum[name].add_(m)
             num_steps += 1
 
-    if use_mean_cv:  # c_i <- mean momentum over the round (SCAFFOLD rule)
+    if use_mean_cv:   # c_i <- mean momentum over the round (SCAFFOLD rule)
         new_local_c = {
             k: (t / max(num_steps, 1)).detach().cpu() for k, t in grad_accum.items()
         }
-    else:  # c_i <- final local momentum (FedMuon paper rule)
+    else:             # c_i <- final local momentum (FedMuon paper rule)
         new_local_c = {k: t.detach().cpu().clone() for k, t in momentum.items()}
     new_momentum = {k: t.detach().cpu() for k, t in momentum.items()}
     new_v = {k: t.detach().cpu() for k, t in v_buf.items()}
@@ -287,18 +253,18 @@ def train_client_corrected(
     for key, base_value in base_state.items():
         if torch.is_floating_point(base_value):
             pseudo_grad[key] = local_state[key].detach().cpu() - base_value
-    del model
-    if fabric.device.type == "cuda":
-        torch.cuda.empty_cache()
-    return (
+    del model   # cached GPU memory is kept: released memory on a shared card is
+    return (    # taken by other jobs, which then starves the next client
         pseudo_grad,
-        total_loss / max(total_batches, 1),
+        float(total_loss) / max(total_batches, 1),
         new_momentum,
         new_v,
         new_last_grad,
         new_local_c,
     )
 
+
+# --- Round bookkeeping: statistics, checkpoints, schedules ----------------------
 
 STAT_COLS = ("method", "alpha", "round", "train_loss", "update_norm", "client_norm_mean",
              "client_drift", "drift_ratio", "muon_lr", "seconds", "peak_gib")
@@ -316,12 +282,10 @@ def state_sq_norm(s) -> float:
 
 def log_round_stats(args, method, alpha, round_idx, train_loss, agg_update,
                     client_sq_sum, client_norm_mean, seconds):
-    """One row per communication round, independent of the eval cadence.
-
-    client_drift = sqrt(sum_i w_i ||d_i||^2 - ||d_bar||^2), the weighted-variance
-    identity, so it costs two scalars rather than a copy of every client update.
-    drift_ratio normalizes it by the aggregate step.
-    """
+    """One row per communication round, independent of the evaluation cadence.
+    client_drift = sqrt(sum_i w_i ||d_i||^2 - ||mean d||^2) (the weighted-variance
+    identity, so no client update has to be kept); drift_ratio divides it by the
+    aggregate step."""
     agg_norm = math.sqrt(max(state_sq_norm(agg_update), 0.0))
     drift = math.sqrt(max(client_sq_sum - agg_norm ** 2, 0.0))
     row = (method, f"{alpha:g}", round_idx, f"{train_loss:.6e}", f"{agg_norm:.6e}",
@@ -330,8 +294,7 @@ def log_round_stats(args, method, alpha, round_idx, train_loss, agg_update,
            f"{getattr(args, 'muon_lr_now', float('nan')):.6e}", f"{seconds:.1f}",
            f"{torch.cuda.max_memory_reserved() / 2**30:.1f}")
     path = Path(args.output_dir) / "round_stats.csv"
-    # round 1 starts a fresh stats file
-    with path.open("w" if round_idx <= 1 else "a") as f:
+    with path.open("w" if round_idx <= 1 else "a") as f:   # round 1 starts the file
         if f.tell() == 0:
             f.write(",".join(STAT_COLS) + "\n")
         f.write(",".join(str(x) for x in row) + "\n")
@@ -368,6 +331,37 @@ def load_checkpoint(path, args):
     return ckpt
 
 
+def cosine(lr, round_idx, args):
+    """Cosine decay from lr at round 1 to zero at the last round."""
+    return lr * 0.5 * (1.0 + math.cos(math.pi * (round_idx - 1) / max(args.rounds, 1)))
+
+
+def set_round_lrs(args, round_idx):
+    """This round's learning rates: muon-lr under --muon-lr-decay, the AdamW and Lion
+    rates under --lr-decay, constant otherwise."""
+    args.muon_lr_now = (cosine(args.muon_lr, round_idx, args)
+                        if args.muon_lr_decay == "cosine" else args.muon_lr)
+    for name in ("lr", "scalar_lr", "scaffold_lr", "lion_lr"):
+        value = getattr(args, name)
+        setattr(args, f"{name}_now",
+                cosine(value, round_idx, args) if args.lr_decay == "cosine" else value)
+
+
+def should_evaluate(round_idx, args):
+    """The configured cadence, plus every round of the reporting tail."""
+    return base.should_evaluate(round_idx, args) or round_idx > args.rounds - args.eval_tail
+
+
+def skip_evaluation(args):
+    """Make the RNG draws an evaluation would make (model construction, loader seed),
+    so a sparser evaluation cadence leaves the training trajectory unchanged."""
+    models.make_model(args)
+    torch.empty((), dtype=torch.int64).random_()
+
+
+# --- Federated rounds --------------------------------------------------------------
+
+
 def round_participants(active, args, round_idx):
     """The clients that train this round: all of them, or a uniform sample of
     --clients-per-round without replacement, deterministic in seed and round."""
@@ -392,11 +386,13 @@ def run_corrected(
     datamodule,
     alpha: float,
 ) -> list[dict[str, float | int | str]]:
+    """The federated loop for every method except fedavg: per-client momentum,
+    second moments, last gradients and control variates persist across rounds."""
     state = base.clone_state_cpu(initial_state)
     active_clients = [client_id for client_id, indices in enumerate(clients) if indices]
     total_samples = sum(len(clients[client_id]) for client_id in active_clients)
 
-    template = base.make_model()
+    template = models.make_model(args)
     zero_params = {
         name: torch.zeros_like(p, device="cpu")
         for name, p in template.named_parameters()
@@ -409,10 +405,11 @@ def run_corrected(
             p.numel() for n, p in template.named_parameters() if not is_muon_param(n, p)
         )
         print(
-            f"[FEDMUON] mode={args.muon_mode}, scale={args.muon_scale}x{args.muon_scale_const:g}, "
+            f"[FEDMUON] mode={args.muon_mode}, "
+            f"scale={args.muon_scale}x{args.muon_scale_const:g}, "
             f"muon_wd={args.muon_wd:g}, mars_gamma={args.mars_gamma:g}, "
-            f"mars_clip={args.mars_clip:g}, "
-            f"ema={args.ema_decay:g}, cv_rule={args.cv_rule}, lr_decay={args.muon_lr_decay}, "
+            f"mars_clip={args.mars_clip:g}, ema={args.ema_decay:g}, "
+            f"cv_rule={args.cv_rule}, lr_decay={args.muon_lr_decay}, "
             f"excludes={MUON_EXCLUDE_KEYWORDS + tuple(MUON_EXTRA_EXCLUDES)}: "
             f"{len(muon_named)} matrix params "
             f"({sum(p.numel() for _, p in muon_named)} weights) via Muon "
@@ -451,12 +448,7 @@ def run_corrected(
             method, alpha, 0)
 
     for round_idx in range(start, args.rounds + 1):
-        if args.muon_lr_decay == "cosine":
-            args.muon_lr_now = args.muon_lr * 0.5 * (
-                1.0 + math.cos(math.pi * (round_idx - 1) / max(args.rounds, 1))
-            )
-        else:
-            args.muon_lr_now = args.muon_lr
+        set_round_lrs(args, round_idx)
         aggregate_update = base.zero_state_like(state)
         losses = []
         new_local_cs = {}
@@ -493,16 +485,16 @@ def run_corrected(
             losses.append(loss)
 
         state = base.state_plus_update(state, aggregate_update, scale=args.server_lr)
-        if method == "fedlion":  # FedLion also averages the momentum buffers
+        if method == "fedlion":   # the server also averages momentum, and every
             mean_m = {k: torch.zeros_like(t) for k, t in momentum[active_clients[0]].items()}
-            for cid in participants:
+            for cid in participants:                     # client receives the mean
                 w = base.client_weight(cid, participants, clients, round_samples,
                                        args.aggregation)
                 for k in mean_m:
                     mean_m[k].add_(momentum[cid][k], alpha=w)
-            for cid in active_clients:       # the server momentum is what any client receives
+            for cid in active_clients:
                 momentum[cid] = {k: t.clone() for k, t in mean_m.items()}
-        for client_id in participants:       # absent clients keep their last control variate
+        for client_id in participants:   # absent clients keep their control variate
             local_c[client_id] = new_local_cs[client_id]
         weights = {
             cid: base.client_weight(
@@ -528,7 +520,7 @@ def run_corrected(
         log_round_stats(args, method, alpha, round_idx, train_loss, aggregate_update,
                         client_sq_sum, float(np.mean(client_norms)) if client_norms
                         else float("nan"), time.time() - round_t0)
-        if base.should_evaluate(round_idx, args):
+        if should_evaluate(round_idx, args):
             rows = eval_ext.evaluate_state(
                 ema_state if ema_state is not None else state,
                 test_dataset,
@@ -544,6 +536,8 @@ def run_corrected(
             )
             history.extend(rows)
             eval_ext.print_round(rows[0], args.rounds)
+        else:
+            skip_evaluation(args)
         save_checkpoint(ckpt_path, round_idx, history, state=state, momentum=momentum,
                         v_moments=v_moments, last_grads=last_grads, local_c=local_c,
                         global_c=global_c, ema_state=ema_state)
@@ -554,146 +548,16 @@ def run_corrected(
     return history
 
 
-# ---------------------------------------------------------------------------
-# CLI / main (mirrors the base script, with the new methods).
-# ---------------------------------------------------------------------------
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "FedAvg/SCAFFOLD/FedMuon on DrivAerNet++ with the cfd_transformer "
-            "Transformer. Vehicle body types define client heterogeneity."
-        )
-    )
-    parser.add_argument(
-        "--data-root", default=str(CFD_ROOT / "dataset" / "DrivAerNetPP")
-    )
-    parser.add_argument("--output-dir", default="log/fedmuon_scaffold_drivaernetpp")
-    parser.add_argument(
-        "--methods", nargs="+", default=["fedavg", "scaffold_adam", "fedmuon"]
-    )
-    parser.add_argument("--alphas", nargs="+", type=float, default=[0.1])
-    parser.add_argument("--num-clients", type=int, default=6)
-    parser.add_argument("--clients-per-round", type=int, default=0,
-                        help="clients sampled per round without replacement; 0 = all")
-    parser.add_argument(
-        "--client-split-mode",
-        default="single_class",
-        choices=["dirichlet", "single_class"],
-    )
-    parser.add_argument(
-        "--single-class-allocation",
-        default="proportional",
-        choices=["equal_classes", "proportional"],
-    )
-    parser.add_argument("--rounds", type=int, default=100)
-    parser.add_argument("--local-epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--micro-batches", type=int, default=1,
-                        help="split each batch into N accumulation steps")
-    parser.add_argument("--lion-lr", type=float, default=1e-4)
-    parser.add_argument("--lion-beta2", type=float, default=0.99)
-    parser.add_argument("--eval-batch-size", type=int, default=1)
-    parser.add_argument("--num-workers", type=int, default=16)
-    # FedAvg client optimizer (AdamW, as in the base script)
-    parser.add_argument("--lr", type=float, default=1.0e-4)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
-    # SCAFFOLD / FedMuon
-    parser.add_argument("--fed-beta", type=float, default=0.9,
-                        help="Momentum coefficient for scaffold/scaffold_adam/fedmuon local steps.")
-    parser.add_argument("--fed-beta2", type=float, default=0.95,
-                        help="Second-moment coefficient for the Adam-style updates.")
-    parser.add_argument("--scaffold-lr", type=float, default=3.0e-4,
-                        help="LR for scaffold (SGD) and scaffold_adam local steps.")
-    parser.add_argument("--muon-lr", type=float, default=0.003,
-                        help="LR for matrix params under the Muon (LMO) update.")
-    parser.add_argument("--scalar-lr", type=float, default=3.0e-4,
-                        help="LR for non-matrix params in fedmuon (Adam-style update).")
-    parser.add_argument("--ns-steps", type=int, default=5,
-                        help="Newton-Schulz iterations (T in the paper). 0 = Frobenius-normalized momentum.")
-    parser.add_argument("--muon-mode", default="lmo", choices=["lmo", "identity", "off"],
-                        help="lmo: Newton-Schulz LMO (default). identity: raw corrected momentum "
-                             "(SGD-scaffold semantics, equivalence test). off: matrix params use "
-                             "the Adam branch (scaffold_adam semantics, equivalence test).")
-    parser.add_argument("--muon-lr-decay", default="none", choices=["none", "cosine"],
-                        help="Per-round decay of muon-lr. LMO updates have constant norm, so "
-                             "constant LR cannot converge to a point.")
-    parser.add_argument("--muon-scale", default="shape", choices=["shape", "rms"],
-                        help="shape: standard Muon sqrt(max(d))*NS(M) (constant-norm LMO). "
-                             "rms: additionally scale by rms(M) so the step tracks gradient "
-                             "magnitude and converges with constant LR (improved spectral-scaffold).")
-    parser.add_argument("--muon-scale-const", type=float, default=1.0,
-                        help="Constant multiplying sqrt(max(d)) in the Muon update. Moonlight uses "
-                             "0.2 to match update RMS to AdamW, making muon-lr transferable.")
-    parser.add_argument("--muon-wd", type=float, default=0.0,
-                        help="Decoupled weight decay on Muon-updated params (Moonlight uses 0.1). "
-                             "Anchors weight norm; prevents the output-RMS drift behind c_d oscillation.")
-    parser.add_argument("--ema-decay", type=float, default=0.0,
-                        help="EMA of the global model across rounds (0=off). Evaluates the EMA "
-                             "model; averages out round-to-round c_d oscillation.")
-    parser.add_argument("--mars-gamma", type=float, default=0.0,
-                        help="MARS-M variance reduction on the Muon gradient (0=off, paper 0.025). "
-                             "c_t = g + gamma*beta/(1-beta)*(g-g_prev), clipped to unit norm.")
-    parser.add_argument("--server-lr", type=float, default=1.0,
-                        help="Server (outer) LR: scales the aggregated client update. 1.0 = plain averaging.")
-    parser.add_argument("--adam-wd", type=float, default=0.0,
-                        help="Decoupled weight decay for the Adam branch (scaffold_adam / fedmuon scalars).")
-    parser.add_argument("--mars-clip", type=float, default=1.0,
-                        help="Clip the MARS corrected gradient c_t to this norm (0 = no clip). "
-                             "MARS-M paper clips to 1; set 0 to isolate variance reduction.")
-    parser.add_argument("--cv-rule", default="final", choices=["final", "mean"],
-                        help="fedmuon control variate: 'final' = c_i<-last momentum (FedMuon paper), "
-                             "'mean' = c_i<-mean momentum over round (SCAFFOLD rule, lower variance).")
-    parser.add_argument("--muon-exclude", default="",
-                        help="Comma-separated extra name substrings excluded from the Muon group.")
-    parser.add_argument("--grad-clip", type=float, default=0.0)
-    parser.add_argument("--downsample-size", type=int, default=50000)
-    parser.add_argument("--test-downsample-size", type=int, default=-1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument("--precision", default="bf16", choices=["fp32", "bf16"])
-    parser.add_argument("--aggregation", default="equal", choices=["equal", "sample"])
-    parser.add_argument("--pressure-weight", type=float, default=1.0)
-    parser.add_argument("--wss-weight", type=float, default=1.0)
-    parser.add_argument("--max-train-samples", type=int, default=0)
-    parser.add_argument("--max-test-samples", type=int, default=0)
-    parser.add_argument("--max-client-batches", type=int, default=0)
-    parser.add_argument("--eval-every", type=int, default=1)
-    parser.add_argument("--skip-round0-eval", action="store_true",
-                        help="Skip the (unused) full test eval of the untrained model at "
-                             "round 0. Saves minutes per run during hyperparameter tuning.")
-    parser.add_argument("--cache-data", action="store_true",
-                        help="Pre-materialize the downsampled dataset into RAM once (single "
-                             "process), then serve it without per-access downsampling. Freezes "
-                             "the random downsample (identical every epoch). Unused by default.")
-    return parser.parse_args()
-
-
-class _ListDataset(torch.utils.data.Dataset):
-    """Serves pre-materialized items from RAM (no disk, no downsampling at access time)."""
-
-    def __init__(self, items):
-        self.items = items
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, i):
-        return self.items[i]
-
-
 def train_client_fedavg(base_state, dataset, indices, args, repo_cfg, fabric):
-    """base.train_client, but with a two-group AdamW: matrix params (same is_muon_param
-    split as the corrected methods) at --lr, the rest at --scalar-lr, beta1=--fed-beta.
-    Keeps the tuning protocol identical across methods: matrix-LR x scalar-LR x beta."""
-    model = base.make_model()
+    """One FedAvg client: AdamW with the same matrix/non-matrix parameter groups as
+    the other methods (--lr and --scalar-lr), beta1 = --fed-beta."""
+    model = models.make_model(args)
     model.load_state_dict(base_state)
     matrix = [p for n, p in model.named_parameters() if is_muon_param(n, p)]
     rest = [p for n, p in model.named_parameters() if not is_muon_param(n, p)]
     optimizer = torch.optim.AdamW(
-        [{"params": matrix, "lr": args.lr},
-         {"params": rest, "lr": args.scalar_lr}],
+        [{"params": matrix, "lr": args.lr_now},
+         {"params": rest, "lr": args.scalar_lr_now}],
         betas=(args.fed_beta, 0.999),
         weight_decay=args.weight_decay,
     )
@@ -720,7 +584,7 @@ def train_client_fedavg(base_state, dataset, indices, args, repo_cfg, fabric):
                 optimizer.zero_grad(set_to_none=True)
             outputs = model(inputs)
             loss, _ = loss_wrapper(inputs, outputs, targets, others)
-            total_loss += float(loss.detach().cpu())
+            total_loss = total_loss + loss.detach().double()   # no per-step GPU sync
             total_batches += 1
             fabric.backward(loss / micro if micro > 1 else loss)
             if (batch_idx + 1) % micro != 0:
@@ -734,19 +598,13 @@ def train_client_fedavg(base_state, dataset, indices, args, repo_cfg, fabric):
         if torch.is_floating_point(base_value):
             grad[key] = local_state[key].detach().cpu() - base_value
     del model
-    if fabric.device.type == "cuda":
-        torch.cuda.empty_cache()
-    return grad, total_loss / max(total_batches, 1)
+    return grad, float(total_loss) / max(total_batches, 1)
 
 
 def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_records,
                          clients, args, repo_cfg, fabric, datamodule, alpha):
-    """FedAvg, but with the server (outer) learning rate applied.
-
-    base.run_fedavg hard-codes the aggregation scale to 1.0, so the baseline could never
-    use the server-lr that the corrected methods tune (1.5 beat 1.0 by ~6%). That would
-    credit our method for a property of the aggregation step rather than of Muon. The
-    client update is untouched (AdamW); only the aggregation scale is exposed."""
+    """The FedAvg loop, with the same server learning rate, participation sampling,
+    checkpointing and evaluation cadence as run_corrected."""
     state = base.clone_state_cpu(initial_state)
     active = [cid for cid, idx in enumerate(clients) if idx]
     ckpt_path = checkpoint_path(args, "fedavg", alpha)
@@ -759,6 +617,7 @@ def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_record
                                           repo_cfg, fabric, datamodule, "fedavg",
                                           alpha, 0)
     for round_idx in range(start, args.rounds + 1):
+        set_round_lrs(args, round_idx)
         aggregate_update = base.zero_state_like(state)
         losses = []
         round_t0 = time.time()
@@ -780,12 +639,14 @@ def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_record
         log_round_stats(args, "fedavg", alpha, round_idx, train_loss, aggregate_update,
                         client_sq_sum, float(np.mean(client_norms)) if client_norms
                         else float("nan"), time.time() - round_t0)
-        if base.should_evaluate(round_idx, args):
+        if should_evaluate(round_idx, args):
             rows = eval_ext.evaluate_state(state, test_dataset, test_records, args, repo_cfg,
                                        fabric, datamodule, "fedavg", alpha, round_idx,
                                        train_loss)
             history.extend(rows)
             eval_ext.print_round(rows[0], args.rounds)
+        else:
+            skip_evaluation(args)
         save_checkpoint(ckpt_path, round_idx, history, state=state)
     torch.save({"state": state, "method": "fedavg", "args": vars(args)},
                Path(args.output_dir) / "model_fedavg.pt")
@@ -793,13 +654,111 @@ def run_fedavg_server_lr(initial_state, train_dataset, test_dataset, test_record
     return history
 
 
+# --- Entry point -------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    p.add_argument("--data-root", default=str(CFD_ROOT / "dataset" / "DrivAerNetPP"))
+    p.add_argument("--output-dir", default="log/fedmuon_scaffold_drivaernetpp")
+    p.add_argument("--model", default=models.DEFAULT, help="configs/model/<name>.yaml")
+    p.add_argument("--methods", nargs="+", default=["fedavg", "scaffold_adam", "fedmuon"])
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    p.add_argument("--precision", default="bf16", choices=["fp32", "bf16"])
+    p.add_argument("--num-workers", type=int, default=16)
+    # clients
+    p.add_argument("--num-clients", type=int, default=6)
+    p.add_argument("--client-split-mode", default="single_class",
+                   choices=["dirichlet", "single_class"])
+    p.add_argument("--alphas", nargs="+", type=float, default=[0.1],
+                   help="Dirichlet concentration(s); one run per value")
+    p.add_argument("--single-class-allocation", default="proportional",
+                   choices=["equal_classes", "proportional"])
+    p.add_argument("--clients-per-round", type=int, default=0,
+                   help="clients sampled per round without replacement; 0 = all")
+    p.add_argument("--aggregation", default="equal", choices=["equal", "sample"])
+    p.add_argument("--server-lr", type=float, default=1.0,
+                   help="scales the aggregated update; 1.0 = plain averaging")
+    # rounds and batches
+    p.add_argument("--rounds", type=int, default=100)
+    p.add_argument("--local-epochs", type=int, default=1)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--micro-batches", type=int, default=1,
+                   help="gradient-accumulation steps per batch (memory / N)")
+    p.add_argument("--grad-clip", type=float, default=0.0)
+    p.add_argument("--max-client-batches", type=int, default=0, help="0 = all")
+    # learning rates and schedules
+    p.add_argument("--lr", type=float, default=1.0e-4, help="fedavg: matrix params")
+    p.add_argument("--scalar-lr", type=float, default=3.0e-4,
+                   help="non-matrix params (fedavg, scaffold_adam, Muon family)")
+    p.add_argument("--scaffold-lr", type=float, default=3.0e-4,
+                   help="scaffold / scaffold_adam: matrix params")
+    p.add_argument("--muon-lr", type=float, default=0.003, help="Muon family: matrix params")
+    p.add_argument("--lion-lr", type=float, default=1e-4)
+    p.add_argument("--lr-decay", default="none", choices=["none", "cosine"],
+                   help="per-round decay of lr, scalar-lr, scaffold-lr and lion-lr")
+    p.add_argument("--muon-lr-decay", default="none", choices=["none", "cosine"],
+                   help="per-round decay of muon-lr (constant-norm updates need it)")
+    p.add_argument("--weight-decay", type=float, default=0.01, help="fedavg and fedlion")
+    p.add_argument("--adam-wd", type=float, default=0.0, help="decoupled, Adam branch")
+    p.add_argument("--muon-wd", type=float, default=0.0, help="decoupled, Muon branch")
+    # momentum
+    p.add_argument("--fed-beta", type=float, default=0.9, help="momentum / Adam beta1")
+    p.add_argument("--fed-beta2", type=float, default=0.95, help="Adam-branch beta2")
+    p.add_argument("--lion-beta2", type=float, default=0.99)
+    p.add_argument("--cv-rule", default="final", choices=["final", "mean"],
+                   help="Muon family control variate: last momentum, or the round mean")
+    p.add_argument("--ema-decay", type=float, default=0.0,
+                   help="evaluate an EMA of the global model instead (0 = off)")
+    # Muon
+    p.add_argument("--ns-steps", type=int, default=5, help="Newton-Schulz iterations")
+    p.add_argument("--muon-mode", default="lmo", choices=["lmo", "identity", "off"],
+                   help="identity / off: equivalence tests without the orthogonalisation")
+    p.add_argument("--muon-scale", default="shape", choices=["shape", "rms"])
+    p.add_argument("--muon-scale-const", type=float, default=1.0,
+                   help="0.2 matches AdamW's update RMS (Moonlight)")
+    p.add_argument("--muon-exclude", default="",
+                   help="comma-separated name substrings kept out of the Muon group "
+                        "(default: the model yaml's list)")
+    p.add_argument("--mars-gamma", type=float, default=0.0,
+                   help="MARS correction g + gamma*beta/(1-beta)*(g - g_prev); 0 = FedMuon")
+    p.add_argument("--mars-clip", type=float, default=1.0,
+                   help="norm the corrected gradient is clipped to (0 = no clip)")
+    # data and evaluation
+    p.add_argument("--downsample-size", type=int, default=50000, help="points per car")
+    p.add_argument("--test-downsample-size", type=int, default=-1, help="-1 = all")
+    p.add_argument("--max-train-samples", type=int, default=0, help="0 = all")
+    p.add_argument("--max-test-samples", type=int, default=0, help="0 = all")
+    p.add_argument("--pressure-weight", type=float, default=1.0)
+    p.add_argument("--wss-weight", type=float, default=1.0)
+    p.add_argument("--eval-batch-size", type=int, default=1)
+    p.add_argument("--eval-every", type=int, default=1)
+    p.add_argument("--eval-tail", type=int, default=0,
+                   help="also evaluate every one of the last N rounds")
+    p.add_argument("--skip-round0-eval", action="store_true",
+                   help="skip evaluating the untrained model")
+    p.add_argument("--cache-data", action="store_true",
+                   help="materialise the downsampled dataset in RAM once (freezes the "
+                        "random downsample; not used by the protocol)")
+    return p.parse_args()
+
+
+class _ListDataset(torch.utils.data.Dataset):
+    """Items materialised in RAM by --cache-data."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        return self.items[i]
+
+
 def _precache_dataset(dataset):
-    """Materialize every (already downsampled + normalized) item into RAM once, in a
-    single process. The real per-access cost is the point downsample (random 6k-of-500k)
-    + normalization -- CPU, not disk. Doing it once up front then serving from RAM makes
-    extra local epochs and later rounds essentially free. Deliberately NO DataLoader
-    workers: forking after CUDA init deadlocks the run. The random downsample is frozen
-    at this pass, so it is applied identically every epoch (fair across methods)."""
+    """Load every item once, single-process (workers forked after CUDA init deadlock)."""
     n = len(dataset)
     items = [None] * n
     for i in range(n):
@@ -817,9 +776,8 @@ def main() -> None:
         raise ValueError(f"--methods must be a subset of {sorted(valid_methods)}")
     if args.eval_batch_size != 1:
         raise ValueError("--eval-batch-size must be 1 (repository metric semantics).")
-    if args.muon_exclude:
-        MUON_EXTRA_EXCLUDES.extend(s for s in args.muon_exclude.split(",") if s)
-    args.muon_lr_now = args.muon_lr
+    MUON_EXTRA_EXCLUDES.extend(models.muon_excludes(args))
+    set_round_lrs(args, 1)
 
     output_dir = Path(args.output_dir)
     log_path = base.setup_run_log(output_dir)
@@ -850,9 +808,6 @@ def main() -> None:
                      "extra local epochs become ~free)...")
         train_dataset = _precache_dataset(train_dataset)
         test_dataset = _precache_dataset(test_dataset)
-        # keep --num-workers: the cache removes the per-sample downsample, but collation
-        # still costs, and serving it single-process just moves the bottleneck. Workers
-        # fork-share the cached tensors (~1GB), so the copies are cheap.
         fabric.print("Pre-cache done.")
     datamodule = base.PointCloudDataModule(base.MEAN_STD_DICT)
 
@@ -861,7 +816,7 @@ def main() -> None:
         f"{len(test_records)} test. Methods: {args.methods}.",
     )
 
-    initial_model = base.make_model()
+    initial_model = models.make_model(args)
     initial_state = base.clone_state_cpu(initial_model.state_dict())
     del initial_model
     output_dir.mkdir(parents=True, exist_ok=True)

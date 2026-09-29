@@ -20,7 +20,8 @@ proxy:                  # tuning / ablations ("validation" setting)
 full:                   # benchmark ("test" setting)
   downsample_size: 50000
   rounds: 100
-  eval_every: 1
+  eval_every: 5         # curves; skipped evaluations leave the trajectory unchanged
+  eval_tail: 5          # every round of the reporting window (96-100)
   max_test_samples: 0   # full test set
   test_downsample_size: -1
   num_workers: 8
@@ -29,7 +30,7 @@ full:                   # benchmark ("test" setting)
 full30:                 # evaluation-scale tuning setting (stages 2 and 3)
   downsample_size: 50000
   rounds: 30
-  eval_every: 1
+  eval_every: 5         # the tuning score reads rounds 20, 25 and 30
   max_test_samples: 0
   test_downsample_size: -1
   num_workers: 8

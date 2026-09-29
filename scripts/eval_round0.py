@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import train as trainer          # noqa: F401  (sets up CFD_ROOT on sys.path)
 import ppbc_drivaernetpp_transformer as base
 import eval_ext
+import models
 
 METRICS = ("c_d_mae", "c_d_r2", "c_l_mae", "c_l_r2", "c_s_mae",
            "rel_l2_p", "rel_l2_wss")
@@ -38,7 +39,7 @@ def round0_row(cfg_path, seed, gpu):
     fabric = base.make_fabric(args)
     fabric.launch()
     base.seed_everything(repo_cfg, fabric, workers=True)   # same order as training
-    state = base.clone_state_cpu(base.make_model().state_dict())
+    state = base.clone_state_cpu(models.make_model(args).state_dict())
 
     records = base.read_records(Path(args.data_root) / "split" / "test_split.json",
                                 Path(args.data_root), args.max_test_samples,

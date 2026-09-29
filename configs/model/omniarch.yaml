@@ -1,0 +1,20 @@
+# OmniArch as shipped in cfd_transformer (config/model/omniarch.yaml there): a Fourier
+# encoder on a voxelised point cloud, a LLaMA-style token backbone, per-point decoding.
+# Untuned here: run the three tuning stages with --model omniarch before benchmarking.
+model:
+  _target_: model.omniarch.OmniArch
+  noise_level: 0.0
+  inout_channels: 8
+  modes: 12
+  resolution: 64
+  hidden_size: 256
+  num_hidden_layers: 4
+  num_heads: 8
+  depth_slices: 16
+  use_normals: true
+  out_quantities: 4
+  decoder_hidden: 32
+  causal: false
+  multiple_of: 256
+  point_hidden: 128
+muon_exclude: [encoder.fc0, decoder.fc2, point_mlp.4]   # input lift and output heads

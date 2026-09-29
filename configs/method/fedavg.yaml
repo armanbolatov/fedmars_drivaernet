@@ -7,7 +7,6 @@ args:
   scalar-lr: 1.0e-4     # = lr (single-LR baseline)
   weight-decay: 0.01
   fed-beta: 0.7         # tuned (edge-probed: 0.6 worse)
-  muon-exclude: preprocess.linear_pre,mlp_out.2   # param-group split kept consistent
 
 # per_split: the per-distribution learning rate, from the evaluation-scale ladder
 # (tune_full.py); all other values transfer from the reference split.
