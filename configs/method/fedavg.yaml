@@ -3,10 +3,11 @@
 method: fedavg
 args:
   methods: fedavg
-  lr: 1.0e-4            # tuned (24-config search, interior)
+  lr: 1.0e-3            # tuned (24-config search, interior)
   scalar-lr: 1.0e-4     # = lr (single-LR baseline)
   weight-decay: 0.01
   fed-beta: 0.7         # tuned (edge-probed: 0.6 worse)
+  lr-decay: cosine
 
 # per_split: the per-distribution learning rate, from the evaluation-scale ladder
 # (tune_full.py); all other values transfer from the reference split.
