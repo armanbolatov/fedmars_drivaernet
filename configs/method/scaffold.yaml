@@ -5,6 +5,7 @@ args:
   scaffold-lr: 1.0e-4   # tuned (edge-probed: 3e-4 worse)
   scalar-lr: 1.0e-4     # = scaffold-lr (single-LR baseline)
   fed-beta: 0.8         # tuned (24-config search, interior)
+  scaffold-lr-decay: cosine
 
 # per_split: the per-distribution learning rate, from the evaluation-scale ladder
 # (tune_full.py); all other values transfer from the reference split.
