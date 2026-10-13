@@ -6,7 +6,7 @@ args:
   fed-beta: 0.8         # Lion beta1 (sign interpolation)
   lion-beta2: 0.95
   weight-decay: 0.01
-  lr-decay: cosine
+  lion-lr-decay: cosine
 
 # per_split: the per-distribution lion-lr, from the evaluation-scale ladder
 # (tune_full.py); all other values transfer from the reference split.
