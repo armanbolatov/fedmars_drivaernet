@@ -47,8 +47,11 @@ except ImportError:                       # same look without the dependency
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "results" / "runs"
-OUT = ROOT / "results" / "figures"
-TABLES = ROOT / "results" / "tables"
+import os
+SUFFIX = os.environ.get("MODEL_SUFFIX", "")          # e.g. "-omniarch"
+
+OUT = ROOT / "results" / f"figures{SUFFIX}"
+TABLES = ROOT / "results" / f"tables{SUFFIX}"
 
 # label, colour, marker, linestyle. FedOLion = FedMuon variant (blue, dashed);
 # ceilings = gray references; FedAvg = the vermilion baseline.
