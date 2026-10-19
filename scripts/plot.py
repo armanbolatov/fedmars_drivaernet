@@ -459,6 +459,7 @@ def fig_ladders():
 
 if __name__ == "__main__":
     print("figures ->", OUT)
+    print("suffix:", repr(SUFFIX), "| runs:", RUNS / f"full30{SUFFIX}")
     for fn in (fig_heterogeneity, fig_local_epochs, fig_convergence, fig_ladders,
                fig_participation, fig_centralized):
         fn()
