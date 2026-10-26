@@ -1,0 +1,2 @@
+alpha,client_split_mode,max_client_size,mean_client_size,mean_normalized_entropy,min_client_size,non_empty_clients,single_class_allocation
+0.1,single_class,1074,950.5,0.0,917,6,proportional
