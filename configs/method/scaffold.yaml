@@ -3,7 +3,7 @@ method: scaffold
 args:
   methods: scaffold_adam
   scaffold-lr: 1.0e-4   # tuned (edge-probed: 3e-4 worse)
-  scalar-lr: 1.0e-4     # = scaffold-lr (single-LR baseline)
+  scalar-lr: 1.0e-4     # = scaffold-lr (single learning rate)
   fed-beta: 0.8         # tuned (24-config search, interior)
 
 # per_split: the per-distribution learning rate, from the evaluation-scale ladder

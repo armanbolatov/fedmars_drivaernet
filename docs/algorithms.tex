@@ -55,7 +55,7 @@ cancels. The one design choice is how to set $C_i$ at the end of a round:
         \emph{exactly} this average --- that is where the mean hides in SCAFFOLD.
   \item \textbf{FedMuon:} the \emph{final} momentum, $\;C_i^{(r+1)}=M_i^{(r,K)}$ ---
         a single end-of-round snapshot, hence a higher-variance estimate.
-  \item \textbf{cv-mean (ours):} the \emph{average} momentum,
+  \item \textbf{cv-mean:} the \emph{average} momentum,
         $\;C_i^{(r+1)}=\frac1K\sum_k M_i^{(r,k)}$ --- brings SCAFFOLD's averaging
         back into FedMuon.
 \end{itemize}
@@ -65,7 +65,7 @@ are served unevenly. Averaging over the $K$ steps is a much lower-variance estim
 so the drift cancels correctly for \emph{every} client. This was exactly our failure
 mode: with the final-momentum rule the hardest client group was badly under-fit
 ($c_d\!=\!0.020$, $R^2\!<\!0$); the mean rule fixed it ($c_d\!=\!0.013$, $R^2\!>\!0$)
-and pushed the global drag error below the SCAFFOLD-Adam baseline.
+and pushed the global drag error below SCAFFOLD-Adam's.
 
 % =====================================================================
 \section*{Algorithms}
@@ -144,7 +144,7 @@ and pushed the global drag error below the SCAFFOLD-Adam baseline.
 
 % ---------------------------------------------------------------- FedMARS-M
 \begin{algorithm}[H]
-\caption{FedMARS-M (our method): FedMuon $+$ MARS-M variance reduction \cite{marsm} $+$ Moonlight scaling \cite{moonlight} $+$ mean control variate}
+\caption{FedMARS-M: FedMuon $+$ MARS-M variance reduction \cite{marsm} $+$ Moonlight scaling \cite{moonlight} $+$ mean control variate}
 \begin{algorithmic}[1]
 \State \textbf{init} $X^{(0)}$, $C^{(0)}\!=\!0$, $C_i^{(0)}\!=\!0$, $M_i^{(-1,K)}\!=\!0$, $G_i\!=\!0$
 \State \textbf{const} $\gamma$ (MARS), $\lambda$ (weight decay), $\phi=0.2$, \ $d=\max(\text{rows},\text{cols})$

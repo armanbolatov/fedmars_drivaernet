@@ -1,0 +1,10 @@
+# FedAvg with AdamW clients and the same cosine learning-rate schedule the spectral methods
+# uses. The constant-rate variant (fedavg.yaml) is the schedule ablation.
+method: fedavg_cosine
+args:
+  methods: fedavg
+  lr: 1.0e-3            # stage-1 best (fed_beta 0.7); both edges probed
+  scalar-lr: 1.0e-3     # = lr (single learning rate)
+  lr-decay: cosine
+  weight-decay: 0.01
+  fed-beta: 0.7

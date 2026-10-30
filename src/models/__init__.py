@@ -5,10 +5,10 @@ A model yaml has two keys:
   model:          a hydra node (`_target_` plus constructor arguments) for any
                   nn.Module whose forward takes the batch's input dict and returns
                   {"pressure": (B, N, 1), "wss": (B, N, 3)} in normalised units
-  muon_exclude:   name substrings of layers the Muon family keeps on Adam
+  muon_exclude:   name substrings of layers the spectral methods keep on Adam
                   (embedding-like layers; `embed` is always excluded)
 
-The trainer, evaluation and prediction all build the network through make_model, so
+The trainer and the evaluation build the network through make_model, so
 a new architecture is one yaml (and a class, if it does not exist yet) plus
 `--model <name>`; nothing else in the pipeline knows which model runs.
 """

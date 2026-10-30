@@ -64,20 +64,26 @@ def acquire_slot(gpu, slots, need_mib, poll=120):
 
 
 def tuned_lr(method, split, local_epochs, suffix=""):
-    """Selected LR: the re-bracket at tuned E if present, else the per-split ladder."""
+    """Selected LR: the re-bracket at tuned E on the reference split (required there),
+    else the per-split ladder."""
     from tune_full import LR_KEY, REFERENCE_SPLIT, SPLIT_INDEPENDENT
     if method not in LR_KEY:
         return None                       # a generated one-off ladder config
     if method in SPLIT_INDEPENDENT:
         split = REFERENCE_SPLIT
-    stems = ["tune_full"] if local_epochs == 1 else ["tune_rebracket", "tune_full"]
-    for stem in stems:
+    at_tuned_e = local_epochs != 1 and split == REFERENCE_SPLIT
+    for stem in ["tune_rebracket"] if at_tuned_e else ["tune_full"]:
         path = ROOT / "results" / f"{stem}_{method}{suffix}.json"
         if not path.exists():
             continue
         for row in json.loads(path.read_text()):
             if row["split"] == split:
                 return LR_KEY[method], float(row["best"])
+    # a method with tuning records must never run its tuned budget at the one-epoch
+    # rate; one without records (e.g. a model not yet tuned) uses its method yaml
+    if at_tuned_e and (ROOT / "results" / f"tune_full_{method}{suffix}.json").exists():
+        sys.exit(f"no tune_rebracket record for {method}{suffix}: "
+                 "run tune_full.py --rebracket first")
     return None
 
 
@@ -128,12 +134,19 @@ def main():
     ap.add_argument("--splits", nargs="+", default=["single_class"])
     ap.add_argument("--seeds", nargs="+", type=int)
     ap.add_argument("--local-epochs", nargs="+", type=int)
+    ap.add_argument("--clients-per-round", nargs="+", type=int,
+                    help="participation suite: only these K (default: all in base.yaml)")
     ap.add_argument("--gpu", required=True)
     ap.add_argument("--min-free-gb", type=int,
                     help="wait for this much free GPU memory before each run "
                          "(default: 35 full-resolution, 18 proxy)")
     ap.add_argument("--slots", type=int, default=1,
                     help="how many of our runs may share one GPU (default 1)")
+    ap.add_argument("--trust-locks", action="store_true",
+                    help="resume a recently interrupted row instead of skipping it as "
+                         "possibly orphaned. Only for a scheduler, where a job's runs die "
+                         "with it, and only when no other runner can take the same row "
+                         "(row locks are not shared across nodes on every file system)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -144,9 +157,12 @@ def main():
     model = None if a.model == "transolver" else a.model   # default: nothing changes
     suffix = f"-{model}" if model else ""
 
-    federated = ["fedavg", "scaffold", "fedlion", "fedmuon", "fedmars", "fedolion"]
+    # every method anneals its learning rate; the constant-rate configs (fedavg,
+    # scaffold, fedlion, centralized) are the schedule ablation, run with --methods
+    federated = ["fedavg_cosine", "scaffold_cosine", "fedlion_cosine2",
+                 "fedmuon", "fedmars", "fedolion"]
     if a.suite == "headline":       # main table: natural split, each method at its
-        methods = methods or federated + ["centralized", "centralized_muon"]  # tuned E
+        methods = methods or federated + ["centralized_cosine", "centralized_muon"]
     elif a.suite == "splits":       # heterogeneity sweep at matched local compute (E=1)
         methods = methods or federated
         splits = ["single_class", "dirichlet_0.5", "dirichlet_10", "dirichlet_1000"]
@@ -156,11 +172,13 @@ def main():
         gammas = base["benchmark"]["gamma_ablation"]
     elif a.suite == "participation":  # clients sampled per round, each method at its
         methods = methods or federated  # tuned local epochs; K=6 is the headline row
-        samplings = base["benchmark"]["clients_per_round"]
+        samplings = a.clients_per_round or base["benchmark"]["clients_per_round"]
     elif a.suite == "epochs":       # local-epoch ladder on the Dirichlet splits (E=1 is
-        methods = methods or federated  # the stage-2 winner, single-class is stage 3)
+        if a.setting != "full30":   # the stage-2 winner, single-class is stage 3)
+            sys.exit("the epochs suite runs in the full30 setting: add --setting full30")
+        methods = methods or federated
         splits = ["dirichlet_0.5", "dirichlet_10", "dirichlet_1000"]
-        epochs = a.local_epochs or [4, 16]
+        epochs = a.local_epochs or [2, 4, 8, 16]
     if not methods:
         sys.exit("give --suite or --methods")
 
@@ -199,7 +217,7 @@ def main():
         outdir.mkdir(parents=True, exist_ok=True)
         newest = max((f.stat().st_mtime for f in outdir.iterdir() if f.name != ".lock"),
                      default=0)
-        if time.time() - newest < 7200:        # longer than any round: a run whose
+        if not a.trust_locks and time.time() - newest < 7200:  # a run whose
             print("    in progress (fresh output), skipping", flush=True)  # runner died
             failed.append(str(outdir.relative_to(ROOT)))
             continue

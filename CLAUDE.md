@@ -1,8 +1,14 @@
 # Working in this repository
 
-Federated optimizers (FedMuon, FedMARS-M, FedOLion against FedAvg, SCAFFOLD-Adam,
-FedLion) for a CFD surrogate on DrivAerNet++. `README.md` covers what the methods and
-numbers are; this file covers how to work here without invalidating them.
+Federated optimizers for a CFD surrogate on DrivAerNet++: spectral methods (FedMuon,
+FedMARS-M, FedOLion) and non-spectral methods (FedAvg, SCAFFOLD-Adam, FedLion).
+`README.md` covers what the methods and numbers are; this file covers how to work here
+without invalidating them.
+
+In every text, figure and table the two groups are "spectral" and "non-spectral"
+methods. Never call the non-spectral methods baselines. FedMARS-M and FedOLion are
+proposed in this work: say so where the contributions are stated, and otherwise compare
+the two groups.
 
 ## What must not change
 
@@ -19,7 +25,14 @@ The results in `results/` come from a frozen protocol. Preserve it:
 - **Scores.** A benchmark row is the mean over rounds 96-100; a tuning rung is the
   mean at rounds 20, 25 and 30 (`SCORE_ROUNDS` in `tune_full.py`). Selection is on
   drag `c_d` only; lift is reported, never optimised against.
-- **Learning-rate grids use only 1e-x / 3e-x values.**
+- **Learning-rate grids use only 1e-x / 3e-x values.** The local-epoch ladder is
+  exhaustive (`--epochs` runs every rung, since 15 October 2026): a greedy walk stops
+  one rung early when neighbouring rungs differ by less than the score's noise.
+- **Every headline method anneals its learning rate.** The non-spectral methods are
+  the `*_cosine` method configs; `fedavg`, `scaffold`, `fedlion` and `centralized`
+  are their constant-rate ancestors, kept with their records and runs as the schedule
+  ablation. Never benchmark a non-spectral method under the constant-rate config except
+  for that ablation, and never fold one set's records into the other's.
 - **Bit-identity of `src/train.py`.** Any edit there must reproduce the reference
   digits of a 6-round proxy run exactly (see "Checking a change"). Evaluation cadence
   and checkpoint/resume are built to keep the trajectory identical; keep it that way.
@@ -33,7 +46,7 @@ The results in `results/` come from a frozen protocol. Preserve it:
 - `configs/base.yaml` holds the protocol constants and the three settings;
   `configs/method/*.yaml` the per-method structural hyperparameters;
   `configs/model/*.yaml` the architectures. Files matching `configs/method/*_lr*.yaml`
-  are generated ladder rungs (ignored by git, except the two schedule-check configs).
+  are generated ladder rungs (ignored by git).
 - Run directories: `results/runs/<setting>/<split>/<method>_E<epochs>[_K<clients>]_s<seed>[_g<gamma>]`.
   A run is finished only when `summary.csv` exists; `round_stats.csv` alone is a
   partial or dead run. `checkpoint_*.pt` means it will resume.
@@ -59,6 +72,29 @@ The results in `results/` come from a frozen protocol. Preserve it:
 - Stop everything of ours:
   `pkill -f "[r]un_bench.sh"; pkill -f "[c]fd_transformer/bin/python scripts/benchmark.py"; pkill -f "[f]edmuon-cfd/src/train.py"`
 
+## Machines
+
+Since 13 October 2026 the non-spectral methods (`*_cosine`: tuning walks and
+benchmark rows) run on the second server (`ssh martin`, RTX A6000 48 GB, one run per
+card, repo and data under `~/cfd`); the spectral methods stay on the A100 server. A
+trajectory is bit-reproducible on the machine that produced it but not across the
+two (bf16 and TF32 kernels differ by GPU model), so never continue, resume or re-run a
+row on the other machine, and keep each method's whole protocol on one machine. A run
+lives on the machine that produced it, with its weights and checkpoints; copy its small
+files (CSV, JSON, logs) and the tuning records to the A100 server, where `report.py`
+and `plot.py` run over both sets, and to the local `results/` tree.
+
+Since 23 October 2026 the MBZUAI DANA cluster (Slurm, A100 40 GB) is a third machine.
+Its A100s reproduce the A100 server's reference digits exactly, so for the protocol it
+is the same machine as the A100 server. By the maintainer's decision the non-spectral
+methods' 100-round rows of record run there, although their tuning ran on the A6000s; the paper
+states "tuned on A6000, 100-round rows on A100", and the A6000 rows that were already
+running stay as a hardware cross-check, kept apart from the A100 rows: on the A100
+server and in the local tree they live in `results/runs_a6000/`, which `report.py`,
+`plot.py` and `validate.py` do not read. Everything on
+DANA goes through Slurm and follows the cluster wiki: no compute on the login node,
+no idle allocations, the GPU is the one Slurm assigns.
+
 ## Checking a change
 
 ```
@@ -83,7 +119,7 @@ forward takes the batch's input dict (it may read `centroid` and `normal`, both
 units. Loss, metrics, force integration and checkpoints key off those two outputs.
 
 To add one: write `configs/model/<name>.yaml` (a hydra `model:` node plus
-`muon_exclude`, the embedding-like layers the Muon family keeps on Adam), put the
+`muon_exclude`, the embedding-like layers the spectral methods keep on Adam), put the
 class where hydra can import it (`src/models/<name>.py` or the cfd_transformer repo),
 then pass `--model <name>` to `tune.py`, `tune_full.py` and `benchmark.py`. Runs land
 in `results/runs/<setting>-<name>/`, tuning records in `results/tune_*_<method>-<name>.json`

@@ -1,0 +1,13 @@
+# Centralized AdamW upper bound (one client holding all data) with the cosine
+# learning-rate schedule; centralized.yaml is the constant-rate variant.
+method: centralized_cosine
+args:
+  methods: fedavg
+  num-clients: 1
+  client-split-mode: dirichlet
+  alphas: 1000000
+  lr: 3.0e-4            # stage-1 best (fed_beta 0.8), no edge hit
+  scalar-lr: 3.0e-4
+  lr-decay: cosine
+  weight-decay: 0.01
+  fed-beta: 0.8

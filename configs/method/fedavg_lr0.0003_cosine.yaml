@@ -1,9 +1,0 @@
-# Schedule check: FedAvg at its re-bracketed E=16 rate with cosine decay (appendix).
-method: fedavg_lr0.0003_cosine
-args:
-  methods: fedavg
-  lr: 3.0e-4
-  scalar-lr: 3.0e-4
-  lr-decay: cosine
-  weight-decay: 0.01
-  fed-beta: 0.7

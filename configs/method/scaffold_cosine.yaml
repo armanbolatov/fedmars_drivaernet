@@ -1,0 +1,9 @@
+# SCAFFOLD-Adam with the cosine learning-rate schedule; scaffold.yaml is the
+# constant-rate variant (schedule ablation).
+method: scaffold_cosine
+args:
+  methods: scaffold_adam
+  scaffold-lr: 3.0e-5   # stage-1 best (fed_beta 0.8), no edge hit
+  scalar-lr: 3.0e-5     # = scaffold-lr (single learning rate)
+  lr-decay: cosine
+  fed-beta: 0.8

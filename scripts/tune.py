@@ -75,6 +75,11 @@ SPACES = {
     "fedavg": {"lr": FEDAVG_LR, "fed_beta": BETA},
     "centralized": {"lr": FEDAVG_LR, "fed_beta": BETA},
     "centralized_muon": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
+    # the non-spectral methods re-tuned with the cosine schedule (same spaces)
+    "fedavg_cosine": {"lr": FEDAVG_LR, "fed_beta": BETA},
+    "scaffold_cosine": {"scaffold_lr": SCAF_LR, "fed_beta": BETA},
+    "fedlion_cosine": {"lion_lr": LION_LR, "fed_beta": BETA, "lion_beta2": LION_B2},
+    "centralized_cosine": {"lr": FEDAVG_LR, "fed_beta": BETA},
     "gamma": {"mars_gamma": GAMMA},
     "smoke": {"muon_lr": MUON_LR, "scalar_lr": MUON_SCALAR, "fed_beta": BETA},
 }
@@ -126,7 +131,8 @@ def reference_params(stage):
 
 # per-alpha studies start from the method's own single_class optimum
 REFERENCE_SEEDED = ("fedmuon", "fedmars", "scaffold", "fedavg", "fedlion",
-                    "fedolion", "centralized")
+                    "fedolion", "centralized", "fedavg_cosine", "scaffold_cosine",
+                    "fedlion_cosine")
 
 
 def distinct(study):
@@ -145,6 +151,9 @@ def build_cmd(stage, p, outdir, rounds=0):
     if MODEL != "transolver":
         cmd += ["--model", MODEL]
     key = {"smoke": "fedmuon"}.get(stage, stage)
+    if key.endswith("_cosine"):          # re-tuned under the schedule
+        cmd += ["--lr-decay", "cosine"]
+        key = key[: -len("_cosine")]
     if key == "scaffold":  # single lr: same value for both param groups
         cmd += ["--methods", "scaffold_adam", "--grad-clip", "1.0",
                 "--scaffold-lr", repr(p["scaffold_lr"]), "--scalar-lr", repr(p["scaffold_lr"]),

@@ -26,7 +26,12 @@ STRUCTURAL = {"fedavg": ["fed_beta", "weight_decay"], "scaffold": ["fed_beta"],
               "fedmars": ["fed_beta", "scalar_lr", "mars_gamma", "muon_wd"],
               "fedolion": ["fed_beta", "scalar_lr", "mars_gamma", "muon_wd"],
               "centralized": ["fed_beta", "weight_decay"],
-              "centralized_muon": ["fed_beta", "scalar_lr", "muon_wd"]}
+              "centralized_muon": ["fed_beta", "scalar_lr", "muon_wd"],
+              "fedavg_cosine": ["fed_beta", "weight_decay", "lr_decay"],
+              "scaffold_cosine": ["fed_beta", "lr_decay"],
+              "fedlion_cosine": ["fed_beta", "lion_beta2", "weight_decay", "lr_decay"],
+              "fedlion_cosine2": ["fed_beta", "lion_beta2", "weight_decay", "lr_decay"],
+              "centralized_cosine": ["fed_beta", "weight_decay", "lr_decay"]}
 METRICS = ("c_d_mae", "c_l_mae", "c_s_mae")
 
 
@@ -90,7 +95,9 @@ def check(run, problems):
     want = {k.replace("-", "_"): v for k, v in spec["args"].items()}
     for k in STRUCTURAL[method]:
         if k in want and cfg.get(k) is not None:
-            if abs(float(want[k]) - float(cfg[k])) > 1e-12:
+            same = (str(want[k]) == str(cfg[k]) if isinstance(want[k], str)
+                    else abs(float(want[k]) - float(cfg[k])) <= 1e-12)
+            if not same:
                 problems.append(f"{run}: {k} = {cfg[k]}, canonical value is {want[k]}")
 
 

@@ -2,7 +2,7 @@
 data/
 dataset/
 log/
-results*/runs/
+results*/runs*/
 *.pk
 *.pkl
 *.pth
@@ -18,6 +18,5 @@ __pycache__/
 # docs are local working notes; only the algorithm statements ship
 docs/*
 !docs/algorithms.tex
-# one-off method configs written by the ladder walks (the schedule-check pair is kept)
+# one-off method configs written by the ladder walks
 configs/method/*_lr*.yaml
-!configs/method/fedavg_lr*_cosine.yaml

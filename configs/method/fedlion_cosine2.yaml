@@ -1,0 +1,13 @@
+# FedLion with the cosine schedule and the momentum pair of the constant-rate search
+# (fedlion.yaml). The cosine proxy search (fedlion_cosine.yaml: beta1 0.99, beta2 0.9,
+# rate 1e-5) did not transfer to full resolution: its stage-2 score at one epoch is 7%
+# worse than the constant-rate ancestor's. Whichever of the two does better at full
+# scale is the cosine FedLion of record; the other stays as a documented failed transfer.
+method: fedlion_cosine2
+args:
+  methods: fedlion
+  lion-lr: 3.0e-4       # constant-rate stage-1 best; stage 2 re-walks it
+  lr-decay: cosine
+  fed-beta: 0.8
+  lion-beta2: 0.95
+  weight-decay: 0.01

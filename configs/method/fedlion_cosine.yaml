@@ -1,0 +1,10 @@
+# FedLion with the cosine learning-rate schedule; fedlion.yaml is the constant-rate
+# variant (schedule ablation).
+method: fedlion_cosine
+args:
+  methods: fedlion
+  lion-lr: 1.0e-5       # stage-1 best; all three edges probed one rung out, none better
+  lr-decay: cosine
+  fed-beta: 0.99
+  lion-beta2: 0.9
+  weight-decay: 0.01

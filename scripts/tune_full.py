@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Bracketed selection at evaluation scale: 50k points, 30 communication rounds.
 
-One rule for both ladders: walk outward from the start until the best rung is
-worse on both sides; ladder ends are recorded, never silently accepted.
+The learning-rate ladder walks outward from the start until the best rung is worse
+on both sides; ladder ends are recorded, never silently accepted. The local-epoch
+ladder evaluates every rung.
 
   python scripts/tune_full.py --methods fedmuon --gpu 0              # LR per split
   python scripts/tune_full.py --methods fedmuon --epochs --gpu 0     # local epochs
@@ -47,11 +48,15 @@ REFERENCE_SPLIT = "single_class"
 # the scale-sensitive learning rate, by method
 LR_KEY = {"fedavg": "lr", "scaffold": "scaffold-lr", "centralized": "lr",
           "fedmuon": "muon-lr", "fedmars": "muon-lr", "fedlion": "lion-lr",
-          "fedolion": "muon-lr", "centralized_muon": "muon-lr"}
+          "fedolion": "muon-lr", "centralized_muon": "muon-lr",
+          "fedavg_cosine": "lr", "scaffold_cosine": "scaffold-lr",
+          "fedlion_cosine": "lion-lr", "centralized_cosine": "lr",
+          "fedlion_cosine2": "lion-lr"}
 # single-learning-rate methods drive both parameter groups from one value
-SINGLE_LR = ("fedavg", "scaffold", "centralized")
+SINGLE_LR = ("fedavg", "scaffold", "centralized",
+             "fedavg_cosine", "scaffold_cosine", "centralized_cosine")
 # hold all the data, so one walk on the reference split covers every distribution
-SPLIT_INDEPENDENT = ("centralized", "centralized_muon")
+SPLIT_INDEPENDENT = ("centralized", "centralized_muon", "centralized_cosine")
 SCORE_ROUNDS = (20, 25, 30)   # explicit, so a denser evaluation cadence scores the same
 DIVERGED = float("inf")
 
@@ -73,10 +78,17 @@ def rundir(method, split, lr, epochs):
     return runs_root() / split / f"{tag_for(method, split, lr)}_E{epochs}_s42"
 
 
+def stopped_nonfinite(run_dir):
+    """True if training stopped on non-finite gradients: the FedAvg path's gradient
+    clipping raises instead of logging NaN, and a retry resumes into the same crash."""
+    log = run_dir / "run.log"
+    return log.exists() and "is non-finite" in log.read_text(errors="ignore")[-4000:]
+
+
 def score(run_dir):
     """Mean c_d MAE over SCORE_ROUNDS. None if the run has not finished."""
     if not (run_dir / "summary.csv").exists():
-        return None
+        return DIVERGED if stopped_nonfinite(run_dir) else None
     rows = [r for r in csv.DictReader((run_dir / "history.csv").open())
             if r.get("body") == "all" and int(r["round"]) in SCORE_ROUNDS]
     values = [float(r["c_d_mae"]) for r in rows]
@@ -112,6 +124,9 @@ def run(method, split, lr, epochs, gpu, slots):
               flush=True)
         if subprocess.run(cmd, cwd=str(ROOT)).returncode == 0:
             return
+        if stopped_nonfinite(rundir(method, split, lr, epochs)):
+            print("    diverged (non-finite gradients)", flush=True)
+            return
         subprocess.run(["sleep", "600"])
     raise RuntimeError(f"{tag_for(method, split, lr)} E{epochs}: exhausted retries")
 
@@ -142,8 +157,9 @@ def climb(ladder, start, measure):
     return best, scores
 
 
-def select(method, split, gpu, ladder, start, budget, epochs_of, lr_of, slots=1):
-    """Run one bracketing walk and return its record."""
+def select(method, split, gpu, ladder, start, budget, epochs_of, lr_of, slots=1,
+           full=False):
+    """Run one bracketing walk (or, with `full`, every rung) and return its record."""
     spent = [0]
 
     def measure(value):
@@ -157,7 +173,15 @@ def select(method, split, gpu, ladder, start, budget, epochs_of, lr_of, slots=1)
         run(method, split, lr_of(value), epochs_of(value), gpu, slots)
         return score(d) or DIVERGED
 
-    best, scores = climb(ladder, start, measure)
+    if full:                 # every rung: a 2% score difference can stop a walk early
+        scores = {}
+        for value in ladder:
+            if (s := measure(value)) is None:
+                break
+            scores[value] = s
+        best = min(scores, key=scores.get)
+    else:
+        best, scores = climb(ladder, start, measure)
     evaluated = {f"{k:g}": (v if v != DIVERGED else "diverged")
                  for k, v in scores.items()}
     print(f"  {method} @ {split}: best {best:g} ({scores[best]:.4e}) "
@@ -201,7 +225,8 @@ def main():
     ap.add_argument("--methods", nargs="+", required=True, choices=sorted(LR_KEY))
     ap.add_argument("--splits", nargs="+", default=None)
     ap.add_argument("--epochs", action="store_true",
-                    help="walk the local-epoch ladder instead of the learning rate")
+                    help="evaluate every rung of the local-epoch ladder instead of the "
+                         "learning rate")
     ap.add_argument("--rebracket", action="store_true",
                     help="re-walk the learning rate at the selected local-epoch budget")
     ap.add_argument("--gpu", required=True)
@@ -231,7 +256,8 @@ def main():
             if a.epochs:
                 lr = selected_lr(method, split)
                 row = select(method, split, a.gpu, E_LADDER, 1, budget,
-                             epochs_of=lambda e: e, lr_of=lambda e: lr, slots=a.slots)
+                             epochs_of=lambda e: e, lr_of=lambda e: lr, slots=a.slots,
+                             full=True)
             elif a.rebracket:
                 # LR and E interact: confirm the rate at the selected E
                 epochs = selected_epochs(method)

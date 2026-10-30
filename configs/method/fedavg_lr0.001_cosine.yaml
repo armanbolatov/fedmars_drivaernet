@@ -1,9 +1,0 @@
-# Schedule check: FedAvg one rung above its E=16 rate, with cosine decay (appendix).
-method: fedavg_lr0.001_cosine
-args:
-  methods: fedavg
-  lr: 1.0e-3
-  scalar-lr: 1.0e-3
-  lr-decay: cosine
-  weight-decay: 0.01
-  fed-beta: 0.7
