@@ -13,8 +13,6 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter
 ROOT = Path("results/runs/full30-omniarch")
 SEED = 42
 
-N_ROUNDS = 30   # <-- add this near the other CONFIG constants (after SEED, say)
-
 METRIC = "c_d_mae"            # any column of summary.csv (c_l_mae, c_p_rmse, ...)
 Y_LABEL = None                # None -> auto label from METRIC
 
@@ -71,12 +69,6 @@ def load_metric(series_dir: str, method_dir: str, E: int):
         if "round" in df.columns:          # take the last round
             df = df.sort_values("round")
 
-        # --- NEW: skip folders that don't have the full N_ROUNDS rounds ---
-        if "round" in df.columns and len(df) < N_ROUNDS:
-            warnings.warn(
-                f"{path}: only {len(df)} rounds (< {N_ROUNDS}) -> skipping"
-            )
-            return None
 
         return float(df[METRIC].iloc[-1])
     except Exception as e:                 # never crash on a bad file
