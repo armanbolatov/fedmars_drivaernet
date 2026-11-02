@@ -60,9 +60,9 @@ def load_metric(series_dir: str, method_dir: str, E: int):
             return None
 
         # --- NEW: skip folders that still have a .lock file (run incomplete) ---
-        if (run_dir / ".lock").exists():
-            warnings.warn(f"{run_dir}: .lock file present -> skipping")
-            return None
+        # if (run_dir / ".lock").exists():
+        #     warnings.warn(f"{run_dir}: .lock file present -> skipping")
+        #     return None
 
         df = pd.read_csv(path)
         if METRIC not in df.columns or df.empty:
