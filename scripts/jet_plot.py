@@ -33,9 +33,9 @@ EPOCHS = [1, 2, 4, 8, 16]    # all possible E values
 # (ONLY single_class IS KNOWN - fix the alpha folder names)
 SERIES = {
     "single-class": "single_class",
-    "α=0.5":        "alpha0.5",
-    "α=10":         "alpha10",
-    "α=1000":       "alpha1000",
+    "α=0.5":        "dirichlet_0.5",
+    "α=10":         "dirichlet_10",
+    "α=1000":       "dirichlet_1000",
 }
 
 N_COLS = 3                    # 8 methods -> 2 rows x 4 cols, as in the photo
