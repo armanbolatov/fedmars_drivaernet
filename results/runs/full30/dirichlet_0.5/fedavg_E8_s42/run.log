@@ -1,4 +1,0 @@
-Logging to /home/valetov/jet/fedmars_drivaernet/results/runs/full30/dirichlet_0.5/fedavg_E8_s42/run.log
-cfd_transformer root: /home/valetov/cfd_transformer
-Loaded DrivAerNet++: 5703 train, 1154 test. Methods: ['fedavg'].
-alpha=0.5 distribution: {'non_empty_clients': 6, 'mean_client_size': 950.5, 'min_client_size': 554, 'max_client_size': 1954, 'mean_normalized_entropy': 0.5584382023764523, 'alpha': 0.5, 'client_split_mode': 'dirichlet', 'single_class_allocation': 'proportional'}
