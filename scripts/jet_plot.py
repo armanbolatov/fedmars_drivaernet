@@ -13,6 +13,8 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter
 ROOT = Path("results/runs/full30-omniarch")
 SEED = 42
 
+N_ROUNDS = 30   # <-- add this near the other CONFIG constants (after SEED, say)
+
 METRIC = "c_d_mae"            # any column of summary.csv (c_l_mae, c_p_rmse, ...)
 Y_LABEL = None                # None -> auto label from METRIC
 
@@ -33,9 +35,9 @@ EPOCHS = [1, 2, 4, 8, 16]    # all possible E values
 # (ONLY single_class IS KNOWN - fix the alpha folder names)
 SERIES = {
     "single-class": "single_class",
-    # "α=0.5":        "alpha0.5",
-    # "α=10":         "alpha10",
-    # "α=1000":       "alpha1000",
+    "α=0.5":        "alpha0.5",
+    "α=10":         "alpha10",
+    "α=1000":       "alpha1000",
 }
 
 N_COLS = 3                    # 8 methods -> 2 rows x 4 cols, as in the photo
@@ -51,16 +53,31 @@ COLORS = ["#440154", "#3b528b", "#21918c", "#7ad151"]  # viridis-like
 
 def load_metric(series_dir: str, method_dir: str, E: int):
     """Return metric value (float) or None if it can't be loaded."""
-    path = ROOT / series_dir / f"{method_dir}_E{E}_s{SEED}" / "summary.csv"
+    run_dir = ROOT / series_dir / f"{method_dir}_E{E}_s{SEED}"
+    path = run_dir / "summary.csv"
     try:
         if not path.exists():
             return None
+
+        # --- NEW: skip folders that still have a .lock file (run incomplete) ---
+        if (run_dir / ".lock").exists():
+            warnings.warn(f"{run_dir}: .lock file present -> skipping")
+            return None
+
         df = pd.read_csv(path)
         if METRIC not in df.columns or df.empty:
             warnings.warn(f"{path}: column '{METRIC}' missing/empty")
             return None
         if "round" in df.columns:          # take the last round
             df = df.sort_values("round")
+
+        # --- NEW: skip folders that don't have the full N_ROUNDS rounds ---
+        if "round" in df.columns and len(df) < N_ROUNDS:
+            warnings.warn(
+                f"{path}: only {len(df)} rounds (< {N_ROUNDS}) -> skipping"
+            )
+            return None
+
         return float(df[METRIC].iloc[-1])
     except Exception as e:                 # never crash on a bad file
         warnings.warn(f"Could not read {path}: {e}")
