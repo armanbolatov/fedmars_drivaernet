@@ -1,0 +1,12 @@
+HYDRA_FULL_ERROR=1 nohup python3 scripts/jet_benchmark.py \
+    --methods fedmars \
+    --splits single_class \
+    --local-epochs 2 4 \
+    --muon-lrs 0.001 0.002 0.003 0.005 \
+    --scalar-lrs 0.00003 0.0001 \
+    --muon-wds 0.01 0.05 0.1 \
+    --fed-betas 0.8 0.9 0.95 \
+    --setting proxy \
+    --model omniarch \
+    --run-folder fedmars_search \
+    --gpu 3 > jet_search.txt &
