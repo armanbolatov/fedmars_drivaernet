@@ -14,7 +14,7 @@ OUT_DIR = Path("jet_plots/fedmars_search")
 
 # Example: fedmars_E2_s42_mlr0p001_slr3em05_wd0p01_beta0p9
 RUN_RE = re.compile(
-    r"^fedmars_E(?P<epochs>\\d+)_s(?P<seed>\\d+)"
+    r"^fedmars_E(?P<epochs>\d+)_s(?P<seed>\d+)"
     r"_mlr(?P<mlr>[0-9p]+)_slr(?P<slr>[0-9pem]+)"
     r"_wd(?P<wd>[0-9p]+)_beta(?P<beta>[0-9p]+)$"
 )
