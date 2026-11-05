@@ -23,7 +23,7 @@ def decode_number(s):
     return float(s.replace("p", ".").replace("em", "e-").replace("ep", "e+"))
 
 
-def load_runs():
+def load_history_runs():
     rows = []
     if not ROOT.exists():
         raise FileNotFoundError(f"Run directory not found: {ROOT.resolve()}")
@@ -36,143 +36,105 @@ def load_runs():
             continue
         p = match.groupdict()
 
-        summary = run_dir / "summary.csv"
-        if not summary.exists():
-            warnings.warn(f"Missing {summary}")
+        history_path = run_dir / "history.csv"
+        if not history_path.exists():
+            warnings.warn(f"Missing {history_path}")
             continue
         try:
-            df = pd.read_csv(summary)
+            df = pd.read_csv(history_path)
             if df.empty or METRIC not in df.columns:
-                warnings.warn(f"{summary}: empty or missing {METRIC}")
+                warnings.warn(f"{history_path}: empty or missing {METRIC}")
                 continue
-            if "round" in df.columns:
-                df = df.sort_values("round")
-            value = pd.to_numeric(df[METRIC], errors="coerce").iloc[-1]
-            rows.append({
-                "run": run_dir.name,
-                "epochs": int(p["epochs"]),
-                "muon_lr": decode_number(p["mlr"]),
-                "scalar_lr": decode_number(p["slr"]),
-                "weight_decay": decode_number(p["wd"]),
-                "beta": decode_number(p["beta"]),
-                "seed": int(p["seed"]),
-                "metric": float(value) if pd.notna(value) else np.nan,
-            })
+            
+            # Filter for overall body evaluation if 'body' column exists
+            if "body" in df.columns:
+                df = df[df["body"] == "all"]
+            if df.empty:
+                continue
+
+            df["epochs"] = int(p["epochs"])
+            df["seed"] = int(p["seed"])
+            df["muon_lr"] = decode_number(p["mlr"])
+            df["scalar_lr"] = decode_number(p["slr"])
+            df["weight_decay"] = decode_number(p["wd"])
+            df["beta"] = decode_number(p["beta"])
+            df["run"] = run_dir.name
+
+            rows.append(df)
         except Exception as exc:
-            warnings.warn(f"Could not read {summary}: {exc}")
+            warnings.warn(f"Could not read {history_path}: {exc}")
 
     if not rows:
-        raise RuntimeError(f"No matching runs found in {ROOT.resolve()}")
-    return pd.DataFrame(rows)
+        raise RuntimeError(f"No matching history runs found in {ROOT.resolve()}")
+    return pd.concat(rows, ignore_index=True)
 
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    data = load_runs()
-    valid = data[np.isfinite(data["metric"])].copy()
-    if valid.empty:
-        raise RuntimeError(f"No finite values found for {METRIC}")
+    data = load_history_runs()
+    
+    data[METRIC] = pd.to_numeric(data[METRIC], errors="coerce")
+    data = data.dropna(subset=[METRIC, "round"])
 
-    # Aggregate across seeds for each hyperparameter configuration
-    group_cols = ["epochs", "muon_lr", "scalar_lr", "weight_decay", "beta"]
-    valid_agg = valid.groupby(group_cols, as_index=False).agg(
-        metric=("metric", "mean"),
-        std_metric=("metric", "std"),
-        num_seeds=("seed", "count"),
-        runs=("run", lambda x: ", ".join(x))
-    )
+    if data.empty:
+        raise RuntimeError(f"No valid data found for metric {METRIC}")
 
+    # Optional: Find the best hyperparameter configuration per epoch setup 
+    # based on the final round performance averaged across seeds, ensuring dispersion 
+    # reflects the true variance of stable training runs rather than mixed hyperparameters.
+    hp_cols = ["epochs", "muon_lr", "scalar_lr", "weight_decay", "beta"]
+    
+    # Get final round metric for each run to rank configurations
+    max_rounds = data.groupby("run")["round"].max().reset_index()
+    final_df = pd.merge(data, max_rounds, on=["run", "round"])
+    
+    # Average final metric across seeds for each hyperparameter configuration
+    hp_performance = final_df.groupby(hp_cols, as_index=False)[METRIC].mean()
     ascending = LOWER_IS_BETTER
-    ranking = valid_agg.sort_values("metric", ascending=ascending, na_position="last")
-    csv_path = OUT_DIR / f"{METRIC}_all_runs_averaged.csv"
-    ranking.to_csv(csv_path, index=False)
+    hp_performance = hp_performance.sort_values(METRIC, ascending=ascending)
 
-    best = ranking.iloc[0]
-    epochs_values = sorted(valid_agg["epochs"].unique())
-    wd_values = sorted(valid_agg["weight_decay"].unique())
+    # Pick the best hyperparameter configuration for each epoch setup
+    best_configs = hp_performance.drop_duplicates(subset=["epochs"]).copy()
+    print("Best hyperparameter configuration(s) selected for plotting:")
+    print(best_configs.to_string(index=False))
 
-    fig, axes = plt.subplots(
-        len(epochs_values), len(wd_values),
-        figsize=(5.2 * len(wd_values), 4.0 * len(epochs_values)),
-        squeeze=False, constrained_layout=True,
-    )
-    vmin, vmax = valid_agg["metric"].min(), valid_agg["metric"].max()
-    image = None
+    # Filter history data to only include the best hyperparameter configuration for each epoch setup
+    filtered_data = pd.merge(data, best_configs[hp_cols], on=hp_cols)
 
-    for i, epochs in enumerate(epochs_values):
-        for j, wd in enumerate(wd_values):
-            ax = axes[i, j]
-            subset = valid_agg[
-                (valid_agg["epochs"] == epochs)
-                & np.isclose(valid_agg["weight_decay"], wd)
-            ]
-            pivot = subset.pivot_table(
-                index="scalar_lr", columns="muon_lr",
-                values="metric", aggfunc="mean"
-            ).sort_index().sort_index(axis=1)
+    # Group by epochs and round to compute mean, min, and max across the 5 seeds
+    agg_df = filtered_data.groupby(["epochs", "round"])[METRIC].agg(
+        mean="mean",
+        min="min",
+        max="max"
+    ).reset_index()
 
-            image = ax.imshow(
-                pivot.values, aspect="auto", origin="lower",
-                cmap="viridis_r" if LOWER_IS_BETTER else "viridis",
-                vmin=vmin, vmax=vmax,
-            )
-            ax.set_xticks(np.arange(len(pivot.columns)))
-            ax.set_xticklabels([f"{x:g}" for x in pivot.columns])
-            ax.set_yticks(np.arange(len(pivot.index)))
-            ax.set_yticklabels([f"{y:g}" for y in pivot.index])
-            ax.set_xlabel("Muon learning rate")
-            ax.set_ylabel("Scalar learning rate")
-            ax.set_title(f"E={epochs}, weight decay={wd:g}")
+    # Plotting learning curves with dispersion bands
+    plt.figure(figsize=(9, 6), constrained_layout=True)
+    epochs_values = sorted(agg_df["epochs"].unique())
+    colors = plt.cm.tab10(np.linspace(0, 1, len(epochs_values)))
 
-            midpoint = (vmin + vmax) / 2
-            for ri, scalar_lr in enumerate(pivot.index):
-                for ci, muon_lr in enumerate(pivot.columns):
-                    value = pivot.loc[scalar_lr, muon_lr]
-                    if pd.isna(value):
-                        label = "—"
-                        text_color = "black"
-                    else:
-                        label = f"{value:.4g}"
-                        text_color = (
-                            "white" if
-                            ((LOWER_IS_BETTER and value < midpoint) or
-                             (not LOWER_IS_BETTER and value > midpoint))
-                            else "black"
-                        )
-                    ax.text(ci, ri, label, ha="center", va="center",
-                            color=text_color, fontsize=9)
+    for idx, epochs in enumerate(epochs_values):
+        sub = agg_df[agg_df["epochs"] == epochs].sort_values("round")
+        rounds = sub["round"]
+        mean_val = sub["mean"]
+        min_val = sub["min"]
+        max_val = sub["max"]
+        color = colors[idx]
 
-                    if (
-                        int(epochs) == int(best["epochs"])
-                        and np.isclose(wd, best["weight_decay"])
-                        and np.isclose(muon_lr, best["muon_lr"])
-                        and np.isclose(scalar_lr, best["scalar_lr"])
-                    ):
-                        ax.add_patch(plt.Rectangle(
-                            (ci - 0.48, ri - 0.48), 0.96, 0.96,
-                            fill=False, edgecolor="red", linewidth=2.5,
-                        ))
+        plt.plot(rounds, mean_val, label=f"Epochs = {epochs} (Mean)", color=color, linewidth=2.2)
+        plt.plot(rounds, min_val, linestyle="--", color=color, alpha=0.5, linewidth=1)
+        plt.plot(rounds, max_val, linestyle="--", color=color, alpha=0.5, linewidth=1)
+        plt.fill_between(rounds, min_val, max_val, color=color, alpha=0.15)
 
-    fig.suptitle(
-        f"FedMARS hyperparameter search (Averaged over seeds): {METRIC} "
-        f"(beta={sorted(valid['beta'].unique())})",
-        fontsize=14, fontweight="bold",
-    )
-    cbar = fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.88)
-    cbar.set_label(f"{METRIC} (mean)")
+    plt.xlabel("Training Round", fontsize=12)
+    plt.ylabel(f"{METRIC} (Lower is Better)" if LOWER_IS_BETTER else f"{METRIC} (Higher is Better)", fontsize=12)
+    plt.title(f"FedMARS Learning Curves: {METRIC} across Seeds (Min-Max Dispersion)", fontsize=14, fontweight="bold")
+    plt.legend(loc="best", frameon=True)
+    plt.grid(True, linestyle=":", alpha=0.6)
 
-    plot_path = OUT_DIR / f"{METRIC}_heatmaps.png"
-    fig.savefig(plot_path, dpi=220, bbox_inches="tight")
-    print(f"Saved plot: {plot_path.resolve()}")
-
-    print("\nBest configuration (averaged across seeds):")
-    print(best[["epochs", "muon_lr", "scalar_lr",
-                "weight_decay", "beta", "metric", "std_metric", "num_seeds"]].to_string())
-    print("\nTop 10 configurations:")
-    print(ranking[["epochs", "muon_lr", "scalar_lr", "weight_decay",
-                   "beta", "metric", "std_metric", "num_seeds"]].head(10).to_string(index=False))
-    print(f"\nLoaded {len(data)} total runs across seeds, {len(valid_agg)} unique hyperparameter configurations.")
-    print(f"Saved ranking: {csv_path.resolve()}")
+    plot_path = OUT_DIR / f"{METRIC}_learning_curves_dispersion.png"
+    plt.savefig(plot_path, dpi=220, bbox_inches="tight")
+    print(f"\nSaved learning curve plot: {plot_path.resolve()}")
     plt.show()
 
 
