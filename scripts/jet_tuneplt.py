@@ -79,21 +79,17 @@ def main():
     if data.empty:
         raise RuntimeError(f"No valid data found for metric {METRIC}")
 
-    # Optional: Find the best hyperparameter configuration per epoch setup 
-    # based on the final round performance averaged across seeds, ensuring dispersion 
-    # reflects the true variance of stable training runs rather than mixed hyperparameters.
+    # Find the best hyperparameter configuration per epoch setup 
+    # based on the final round performance averaged across seeds.
     hp_cols = ["epochs", "muon_lr", "scalar_lr", "weight_decay", "beta"]
     
-    # Get final round metric for each run to rank configurations
     max_rounds = data.groupby("run")["round"].max().reset_index()
     final_df = pd.merge(data, max_rounds, on=["run", "round"])
     
-    # Average final metric across seeds for each hyperparameter configuration
     hp_performance = final_df.groupby(hp_cols, as_index=False)[METRIC].mean()
     ascending = LOWER_IS_BETTER
     hp_performance = hp_performance.sort_values(METRIC, ascending=ascending)
 
-    # Pick the best hyperparameter configuration for each epoch setup
     best_configs = hp_performance.drop_duplicates(subset=["epochs"]).copy()
     print("Best hyperparameter configuration(s) selected for plotting:")
     print(best_configs.to_string(index=False))
@@ -101,14 +97,31 @@ def main():
     # Filter history data to only include the best hyperparameter configuration for each epoch setup
     filtered_data = pd.merge(data, best_configs[hp_cols], on=hp_cols)
 
-    # Group by epochs and round to compute mean, min, and max across the 5 seeds
+    # Group by epochs and round to compute mean, min, and max across seeds
     agg_df = filtered_data.groupby(["epochs", "round"])[METRIC].agg(
         mean="mean",
         min="min",
         max="max"
     ).reset_index()
 
-    # Plotting learning curves with dispersion bands
+    # --- Construct the requested CSV format ---
+    # We want rows to be E2_mean, E2_min, E2_max, E4_mean, E4_min, E4_max (or whatever epochs exist)
+    # and columns to be the iteration/round numbers.
+    pivot_rows = []
+    for epochs in sorted(agg_df["epochs"].unique()):
+        sub = agg_df[agg_df["epochs"] == epochs].sort_values("round")
+        for stat in ["mean", "min", "max"]:
+            row_data = {"line_type": f"E{epochs}_{stat}"}
+            for _, r in sub.iterrows():
+                row_data[str(int(r["round"]))] = r[stat]
+            pivot_rows.append(row_data)
+
+    csv_output_df = pd.DataFrame(pivot_rows)
+    csv_path = OUT_DIR / f"{METRIC}_learning_curves_summary_matrix.csv"
+    csv_output_df.to_csv(csv_path, index=False)
+    print(f"\nSaved summary matrix CSV: {csv_path.resolve()}")
+
+    # --- Plotting learning curves with dispersion bands ---
     plt.figure(figsize=(9, 6), constrained_layout=True)
     epochs_values = sorted(agg_df["epochs"].unique())
     colors = plt.cm.tab10(np.linspace(0, 1, len(epochs_values)))
@@ -134,7 +147,7 @@ def main():
 
     plot_path = OUT_DIR / f"{METRIC}_learning_curves_dispersion.png"
     plt.savefig(plot_path, dpi=220, bbox_inches="tight")
-    print(f"\nSaved learning curve plot: {plot_path.resolve()}")
+    print(f"Saved learning curve plot: {plot_path.resolve()}")
     plt.show()
 
 
