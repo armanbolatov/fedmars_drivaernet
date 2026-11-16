@@ -1,0 +1,23 @@
+# FedMARS-M: FedMuon + MARS variance reduction on matrix parameters.
+# Tuned configuration for the noise experiment.
+
+method: fedmars
+args:
+  methods: fedmuon
+  mars-gamma: 0.01
+  muon-lr: 0.005
+  scalar-lr: 0.0001
+  fed-beta: 0.9
+  cv-rule: mean
+  muon-scale: shape
+  muon-scale-const: 0.2
+  muon-lr-decay: cosine
+  muon-wd: 0.01
+
+# Experiment:
+# splits: single_class
+# local-epochs: [2, 4]
+# seeds: [42, 123, 456, 789, 2026]
+# setting: proxy
+# model: omniarch
+# run-folder: fedmars_noise
