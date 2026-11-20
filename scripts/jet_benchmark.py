@@ -162,6 +162,14 @@ def main():
                     help="FedMARS Muon weight-decay grid")
     ap.add_argument("--fed-betas", nargs="+", type=float,
                     help="FedMARS beta grid")
+    ap.add_argument("--lion-lrs", nargs="+", type=float,
+                    help="FedLion learning-rate grid")
+    ap.add_argument("--lion-betas", nargs="+", type=float,
+                    help="FedLion beta1 grid (fed-beta)")
+    ap.add_argument("--lion-beta2s", nargs="+", type=float,
+                    help="FedLion beta2 grid (lion-beta2)")
+    ap.add_argument("--lion-wds", nargs="+", type=float,
+                    help="FedLion weight-decay grid")
     ap.add_argument("--gpu", required=True)
     ap.add_argument("--min-free-gb", type=int,
                     help="wait for this much free GPU memory before each run "
@@ -178,19 +186,35 @@ def main():
     model = None if a.model == "transolver" else a.model
     suffix = f"-{model}" if model else ""
 
-    grid_requested = any([
+    fedmars_grid_requested = any([
         a.muon_lrs is not None,
         a.scalar_lrs is not None,
         a.muon_wds is not None,
         a.fed_betas is not None,
     ])
-    if grid_requested and methods is not None and any(m != "fedmars" for m in methods):
-        sys.exit("FedMARS hyperparameter grids currently support --methods fedmars only")
+    fedlion_grid_requested = any([
+        a.lion_lrs is not None,
+        a.lion_betas is not None,
+        a.lion_beta2s is not None,
+        a.lion_wds is not None,
+    ])
+
+    if fedmars_grid_requested and fedlion_grid_requested:
+        sys.exit("Use the FedMARS and FedLion grids in separate runs.")
+    if fedmars_grid_requested and methods is not None and any(m != "fedmars" for m in methods):
+        sys.exit("FedMARS hyperparameter grids support --methods fedmars only")
+    if fedlion_grid_requested and methods is not None and any(m != "fedlion" for m in methods):
+        sys.exit("FedLion hyperparameter grids support --methods fedlion only")
 
     muon_lrs = a.muon_lrs if a.muon_lrs is not None else [None]
     scalar_lrs = a.scalar_lrs if a.scalar_lrs is not None else [None]
     muon_wds = a.muon_wds if a.muon_wds is not None else [None]
     fed_betas = a.fed_betas if a.fed_betas is not None else [None]
+
+    lion_lrs = a.lion_lrs if a.lion_lrs is not None else [None]
+    lion_betas = a.lion_betas if a.lion_betas is not None else [None]
+    lion_beta2s = a.lion_beta2s if a.lion_beta2s is not None else [None]
+    lion_wds = a.lion_wds if a.lion_wds is not None else [None]
 
     federated = ["fedavg", "scaffold", "fedlion", "fedmuon", "fedmars", "fedolion"]
     if a.suite == "headline":       # main table: natural split, each method at its
@@ -212,8 +236,10 @@ def main():
 
     if not methods:
         sys.exit("give --suite or --methods")
-    if grid_requested and any(m != "fedmars" for m in methods):
-        sys.exit("FedMARS hyperparameter grids currently support fedmars only")
+    if fedmars_grid_requested and any(m != "fedmars" for m in methods):
+        sys.exit("FedMARS hyperparameter grids support --methods fedmars only")
+    if fedlion_grid_requested and any(m != "fedlion" for m in methods):
+        sys.exit("FedLion hyperparameter grids support --methods fedlion only")
 
     def tuned_epochs(m):
         """The local-epoch count selected by the ladder on the reference split."""
@@ -228,29 +254,45 @@ def main():
     todo, skipped = [], 0
     grid = itertools.product(
         methods, splits, epochs, seeds, gammas, samplings,
-        muon_lrs, scalar_lrs, muon_wds, fed_betas
+        muon_lrs, scalar_lrs, muon_wds, fed_betas,
+        lion_lrs, lion_betas, lion_beta2s, lion_wds,
     )
 
-    for m, sp, e, s, g, k, mlr, slr, wd, beta in grid:
+    for (m, sp, e, s, g, k, mlr, slr, muon_wd, fedmars_beta,
+         llr, lion_beta, lion_beta2, lion_wd) in grid:
         if a.suite in ("headline", "participation"):
             e = 1 if m.startswith("centralized") else tuned_epochs(m)
 
         overrides = {
             "muon_lr": mlr,
             "scalar_lr": slr,
-            "muon_wd": wd,
-            "fed_beta": beta,
+            "muon_wd": muon_wd,
+            "fed_beta": fedmars_beta,
+            "lion_lr": llr,
+            "lion_beta2": lion_beta2,
+            "weight_decay": lion_wd,
         }
+        # FedLion's beta1 is named fed_beta in the supplied YAML.
+        if lion_beta is not None:
+            overrides["fed_beta"] = lion_beta
 
         hp_parts = []
         if mlr is not None:
             hp_parts.append(f"mlr{_tag_value(mlr)}")
         if slr is not None:
             hp_parts.append(f"slr{_tag_value(slr)}")
-        if wd is not None:
-            hp_parts.append(f"wd{_tag_value(wd)}")
-        if beta is not None:
-            hp_parts.append(f"beta{_tag_value(beta)}")
+        if muon_wd is not None:
+            hp_parts.append(f"mwd{_tag_value(muon_wd)}")
+        if fedmars_beta is not None:
+            hp_parts.append(f"beta{_tag_value(fedmars_beta)}")
+        if llr is not None:
+            hp_parts.append(f"llr{_tag_value(llr)}")
+        if lion_beta is not None:
+            hp_parts.append(f"lb1{_tag_value(lion_beta)}")
+        if lion_beta2 is not None:
+            hp_parts.append(f"lb2{_tag_value(lion_beta2)}")
+        if lion_wd is not None:
+            hp_parts.append(f"lwd{_tag_value(lion_wd)}")
         hp_tag = "_" + "_".join(hp_parts) if hp_parts else ""
 
         tag = (f"{m}_E{e}" + (f"_K{k}" if k is not None else "") + f"_s{s}"
