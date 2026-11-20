@@ -1,7 +1,7 @@
 HYDRA_FULL_ERROR=1 nohup python3 scripts/jet_benchmark.py \
     --methods fedmars \
-    --splits dirichlet_0.5 dirichlet_10 dirichlet_1000 \
-    --local-epochs 1 2 4 8 \
+    --splits single_class dirichlet_0.5 dirichlet_10 dirichlet_1000 \
+    --local-epochs 16 \
     --seeds 42 123 456 \
     --muon-lrs 0.005 \
     --scalar-lrs 0.0001 \
