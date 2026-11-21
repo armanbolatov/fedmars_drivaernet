@@ -10,5 +10,5 @@ HYDRA_FULL_ERROR=1 nohup python3 scripts/jet_benchmark.py \
     --setting proxy \
     --model omniarch \
     --run-folder fedlion_search \
-    --gpu 3 \
-    > jet_fedlion_search.txt 2>&1 &
+    --gpu 0 --slots 5 \
+    > jet_fedlion_tune.txt 2>&1 &
