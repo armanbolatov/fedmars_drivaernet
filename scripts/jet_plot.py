@@ -39,9 +39,9 @@ EPOCHS = [1, 2, 4, 8]          # epochs in your current experiment
 # Add the other split folders here when those experiments are available.
 SERIES = {
     "single-class": "single_class",
-    # "α=0.5": "dirichlet_0.5",
-    # "α=10": "dirichlet_10",
-    # "α=1000": "dirichlet_1000",
+    "α=0.5": "dirichlet_0.5",
+    "α=10": "dirichlet_10",
+    "α=1000": "dirichlet_1000",
 }
 
 N_COLS = 3
