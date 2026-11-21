@@ -19,7 +19,7 @@ ROOT = Path("results/runs/tuned_fedmars")
 # fedmars_E1_s42_mlr0p005_slr0p0001_wd0p01_beta0p9
 # fedmars_E1_s123_mlr0p005_slr0p0001_wd0p01_beta0p9
 
-METRIC = "c_l_mae"            # e.g. c_d_mae, c_l_mae, c_p_rmse
+METRIC = "c_d_mae"            # e.g. c_d_mae, c_l_mae, c_p_rmse
 Y_LABEL = None                # None -> use METRIC
 
 # Display name -> run-folder prefix in "{prefix}_E{E}_s{seed}..."
